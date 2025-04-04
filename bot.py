@@ -847,6 +847,93 @@ def setup_scheduler():
         return BackgroundScheduler(), False
 
 
+def start_health_check_server(port=8080):
+    """
+    Запускает простой HTTP-сервер для проверки работоспособности бота.
+    Этот сервер будет отвечать на запросы /ping и используется для проверки
+    работоспособности сервиса на платформах, таких как Render.
+    
+    Args:
+        port (int): Порт для запуска HTTP-сервера. По умолчанию 8080.
+    """
+    # Импортируем threading здесь, чтобы он был доступен везде в функции
+    import threading
+    
+    try:
+        # Пробуем использовать Flask, если он доступен
+        from flask import Flask, jsonify
+        
+        app = Flask(__name__)
+        
+        @app.route('/ping', methods=['GET'])
+        def ping():
+            """Простой эндпоинт для проверки работоспособности сервиса."""
+            status = "активен" if DB_READY else "активен, но база данных недоступна"
+            return jsonify({
+                'status': status,
+                'message': 'Бот телеграм запущен и работает',
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'webhook_enabled': USE_WEBHOOK,
+                'webhook_url': WEBHOOK_URL if USE_WEBHOOK else None
+            })
+        
+        # Запускаем Flask в отдельном потоке
+        def run_flask_app():
+            try:
+                app.run(host='0.0.0.0', port=port)
+            except Exception as e:
+                logger.error(f"Ошибка при запуске HTTP-сервера для проверки работоспособности: {e}")
+        
+        # Запускаем в фоновом режиме
+        thread = threading.Thread(target=run_flask_app)
+        thread.daemon = True  # Поток будет автоматически завершен при закрытии основного потока
+        thread.start()
+        logger.info(f"HTTP-сервер для проверки работоспособности (Flask) запущен на порту {port}")
+    
+    except ImportError:
+        # Если Flask не установлен, используем встроенный HTTP-сервер
+        logger.warning("Flask не установлен, используем встроенный http.server для проверки работоспособности")
+        
+        class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+            def _set_headers(self):
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+            
+            def do_GET(self):
+                if self.path == '/ping':
+                    self._set_headers()
+                    status = "активен" if DB_READY else "активен, но база данных недоступна"
+                    response = {
+                        'status': status,
+                        'message': 'Бот телеграм запущен и работает',
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'webhook_enabled': USE_WEBHOOK,
+                        'webhook_url': WEBHOOK_URL if USE_WEBHOOK else None
+                    }
+                    self.wfile.write(json.dumps(response).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+        
+        def run_simple_server():
+            try:
+                server = http.server.HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+                logger.info(f"HTTP-сервер для проверки работоспособности (simple) запущен на порту {port}")
+                server.serve_forever()
+            except Exception as e:
+                logger.error(f"Ошибка при запуске простого HTTP-сервера: {e}")
+        
+        thread = threading.Thread(target=run_simple_server)
+        thread.daemon = True
+        thread.start()
+        logger.info(f"HTTP-сервер для проверки работоспособности запущен на порту {port}")
+    
+    except Exception as e:
+        logger.error(f"Невозможно запустить HTTP-сервер для проверки работоспособности: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
 def main() -> None:
     """Запуск бота."""
     try:
@@ -870,6 +957,10 @@ def main() -> None:
         application = setup_application()
         logger.info("Приложение настроено и готово к запуску")
         
+        # Запуск сервера проверки работоспособности
+        logger.info("Запуск сервера проверки работоспособности")
+        start_health_check_server(port=8080)
+        
         if USE_WEBHOOK:
             # Для Render обеспечиваем корректный путь без повторения токена
             if WEBHOOK_URL and "onrender.com" in WEBHOOK_URL:
@@ -885,12 +976,6 @@ def main() -> None:
                     webhook_path = f"/bot{TELEGRAM_TOKEN}"
                     logger.info(f"Используем стандартный путь вебхука: {webhook_path}")
                 
-                # Запуск сервера здоровья в отдельном потоке на порту 8080
-                logger.info("Запуск сервера проверки состояния на порту 8080")
-                health_check_thread = threading.Thread(target=start_health_check_server, args=(8080,))
-                health_check_thread.daemon = True
-                health_check_thread.start()
-                
                 # Запуск бота с вебхуком, используя правильный путь
                 logger.info(f"Запуск веб-сервера на порту {PORT} с путем вебхука {webhook_path}")
                 application.run_webhook(
@@ -903,12 +988,6 @@ def main() -> None:
                 # Стандартный случай запуска вебхука
                 webhook_path = f"/bot{TELEGRAM_TOKEN}"
                 logger.info(f"Запуск веб-сервера на порту {PORT} с путем вебхука {webhook_path}")
-                
-                # Запуск сервера здоровья в отдельном потоке на порту 8080
-                logger.info("Запуск сервера проверки состояния на порту 8080")
-                health_check_thread = threading.Thread(target=start_health_check_server, args=(8080,))
-                health_check_thread.daemon = True
-                health_check_thread.start()
                 
                 application.run_webhook(
                     listen="0.0.0.0",
