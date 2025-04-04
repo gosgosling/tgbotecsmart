@@ -54,6 +54,7 @@ python bot.py
 2. Создайте новый Web Service, связав его с вашим GitHub-репозиторием
 3. Настройте следующие параметры:
    - **Name**: feedback-bot (или любое другое)
+   - **Runtime**: Python 3
    - **Build Command**: `pip install -r requirements.txt`
    - **Start Command**: `python bot.py`
    
@@ -64,7 +65,20 @@ python bot.py
 
 5. Нажмите "Create Web Service"
 
-После развертывания необходимо установить вебхук для вашего бота. Для этого выполните запрос:
+#### Настройка вебхука
+
+После развертывания необходимо установить вебхук для вашего бота. Есть два способа:
+
+**Способ 1**: Используйте скрипт `set_webhook.py`
+
+```bash
+# Локально на вашем компьютере
+python set_webhook.py
+```
+
+Затем введите URL вашего сервиса на Render, когда будет запрошено (например, https://feedback-bot.onrender.com).
+
+**Способ 2**: Выполните HTTP-запрос вручную
 
 ```
 https://api.telegram.org/bot<YOUR_TELEGRAM_TOKEN>/setWebhook?url=<YOUR_RENDER_URL>/bot<YOUR_TELEGRAM_TOKEN>
@@ -73,6 +87,33 @@ https://api.telegram.org/bot<YOUR_TELEGRAM_TOKEN>/setWebhook?url=<YOUR_RENDER_UR
 Где:
 - `<YOUR_TELEGRAM_TOKEN>` - токен вашего бота
 - `<YOUR_RENDER_URL>` - URL вашего сервиса на Render (например, https://feedback-bot.onrender.com)
+
+#### Проверка статуса вебхука
+
+Вы можете проверить, правильно ли установлен вебхук, выполнив запрос:
+
+```
+https://api.telegram.org/bot<YOUR_TELEGRAM_TOKEN>/getWebhookInfo
+```
+
+### Решение проблем развертывания на Render
+
+Если вы видите ошибки при развертывании:
+
+1. **Ошибка: RuntimeError: To use `start_webhook`, PTB must be installed via `pip install "python-telegram-bot[webhooks]"`**
+   - Убедитесь, что в `requirements.txt` указано `python-telegram-bot[webhooks]`, а не просто `python-telegram-bot`
+
+2. **Ошибка времени**
+   - Проверьте логи на предмет несоответствия времени
+   - Наш бот использует московское время (Europe/Moscow)
+
+3. **Проблемы с базой данных**
+   - На бесплатном плане Render файловая система временная, используйте внешнюю базу данных
+   - Рекомендуется PostgreSQL на Render или другая внешняя база
+
+4. **Бот не отвечает**
+   - Проверьте, что вебхук правильно установлен
+   - Проверьте логи на Render на наличие ошибок
 
 ## Настройка расписания
 
@@ -99,4 +140,5 @@ https://api.telegram.org/bot<YOUR_TELEGRAM_TOKEN>/setWebhook?url=<YOUR_RENDER_UR
 - `.env.example` - пример файла с переменными окружения
 - `Procfile` - файл для запуска на Render
 - `render.yaml` - файл конфигурации для Render
-- `runtime.txt` - версия Python 
+- `runtime.txt` - версия Python
+- `set_webhook.py` - скрипт для установки вебхука 

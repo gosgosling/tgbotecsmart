@@ -2,6 +2,7 @@ import os
 import logging
 from datetime import datetime, timedelta, time as dt_time
 import pytz
+import sys
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -16,15 +17,17 @@ from dotenv import load_dotenv
 from database import User, Schedule, get_session, init_schedule
 from utils import parse_date, format_date, get_current_moscow_time, get_weekday
 
-# Загрузка переменных окружения
-load_dotenv()
-
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    stream=sys.stdout  # Явно указываем вывод в stdout
 )
 logger = logging.getLogger(__name__)
+
+# Загрузка переменных окружения
+load_dotenv()
+logger.info("Переменные окружения загружены")
 
 # Константы для разговорного интерфейса
 CHOOSING_GROUP, ENTERING_START_DATE = range(2)
@@ -33,14 +36,26 @@ CHOOSING_GROUP, ENTERING_START_DATE = range(2)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 MANAGER_CHAT_ID = os.getenv('MANAGER_CHAT_ID')
 
+if not TELEGRAM_TOKEN:
+    logger.error("Токен Telegram не найден в переменных окружения!")
+    sys.exit(1)
+
+logger.info(f"Используется токен: {TELEGRAM_TOKEN[:5]}...{TELEGRAM_TOKEN[-5:]}")
+logger.info(f"ID менеджера: {MANAGER_CHAT_ID}")
+
 # Инициализация глобального планировщика
 scheduler = BackgroundScheduler(timezone=pytz.timezone('Europe/Moscow'))
 
 # Получаем переменные окружения для вебхука (для Render)
-PORT = int(os.environ.get('PORT', 8080))
+PORT = int(os.environ.get('PORT', 10000))
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+
+logger.info(f"PORT: {PORT}")
+logger.info(f"WEBHOOK_URL: {WEBHOOK_URL}")
+logger.info(f"RENDER_EXTERNAL_URL: {RENDER_EXTERNAL_URL}")
+logger.info(f"RENDER_EXTERNAL_HOSTNAME: {RENDER_EXTERNAL_HOSTNAME}")
 
 # Создаем WEBHOOK_URL из RENDER_EXTERNAL_URL, если он определен и WEBHOOK_URL не задан
 if RENDER_EXTERNAL_URL and not WEBHOOK_URL:
@@ -50,6 +65,9 @@ elif RENDER_EXTERNAL_HOSTNAME and not WEBHOOK_URL:
 
 # Проверяем, работаем ли в режиме вебхука или локально
 USE_WEBHOOK = bool(WEBHOOK_URL)
+logger.info(f"Режим вебхука: {'Включен' if USE_WEBHOOK else 'Отключен'}")
+if USE_WEBHOOK:
+    logger.info(f"Используемый URL вебхука: {WEBHOOK_URL}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -253,9 +271,9 @@ def check_and_schedule_feedback_requests():
 
 async def send_feedback_request_to_user(chat_id):
     """Функция для отправки запроса на обратную связь конкретному пользователю."""
-    bot = Application.get_current().bot
-    
     try:
+        bot = Application.get_current().bot
+        
         await bot.send_message(
             chat_id=chat_id,
             text="Занятие завершилось! Пожалуйста, поделитесь вашими впечатлениями и обратной связью о сегодняшнем занятии. Это поможет нам стать лучше!"
@@ -275,57 +293,73 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def main() -> None:
     """Запуск бота."""
-    # Инициализация расписания в базе данных
-    init_schedule()
-    
-    # Настройка планировщика для проверки расписаний каждые 10 минут
-    scheduler.add_job(
-        check_and_schedule_feedback_requests,
-        IntervalTrigger(minutes=10),
-        id='check_schedule'
-    )
-    
-    # Также выполняем проверку при запуске
-    scheduler.add_job(
-        check_and_schedule_feedback_requests,
-        'date',
-        run_date=datetime.now() + timedelta(seconds=30),
-        id='initial_check'
-    )
-    
-    scheduler.start()
-    
-    # Создание приложения бота
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Настройка обработчика регистрации
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            CHOOSING_GROUP: [CallbackQueryHandler(group_choice)],
-            ENTERING_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_date_entered)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
-    
-    # Добавление обработчиков
-    application.add_handler(conv_handler)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, feedback_message))
-    
-    # Запускаем бота в зависимости от режима (вебхук или polling)
-    if USE_WEBHOOK:
-        logger.info(f"Starting webhook mode on port {PORT}, URL: {WEBHOOK_URL}")
-        # Запускаем бота с вебхуком
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=f"bot{TELEGRAM_TOKEN}",
-            webhook_url=WEBHOOK_URL
+    try:
+        # Инициализация расписания в базе данных
+        logger.info("Инициализация расписания...")
+        init_schedule()
+        
+        # Текущее время для проверки
+        now = datetime.now(pytz.timezone('Europe/Moscow'))
+        logger.info(f"Текущее время системы: {now}")
+        
+        # Настройка планировщика для проверки расписаний каждые 10 минут
+        scheduler.add_job(
+            check_and_schedule_feedback_requests,
+            IntervalTrigger(minutes=10),
+            id='check_schedule'
         )
-    else:
-        logger.info("Starting polling mode")
-        # Запускаем бота в режиме опроса
-        application.run_polling()
+        
+        # Также выполняем проверку при запуске через 30 секунд
+        scheduler.add_job(
+            check_and_schedule_feedback_requests,
+            'date',
+            run_date=now + timedelta(seconds=30),
+            id='initial_check'
+        )
+        
+        scheduler.start()
+        logger.info("Планировщик запущен")
+        
+        # Создание приложения бота
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        logger.info("Приложение бота создано")
+        
+        # Настройка обработчика регистрации
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler("start", start)],
+            states={
+                CHOOSING_GROUP: [CallbackQueryHandler(group_choice, pattern="^group_")],
+                ENTERING_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_date_entered)]
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+            per_message=True  # Исправление предупреждения PTBUserWarning
+        )
+        
+        # Добавление обработчиков
+        application.add_handler(conv_handler)
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, feedback_message))
+        logger.info("Обработчики добавлены")
+        
+        # Запускаем бота в зависимости от режима (вебхук или polling)
+        if USE_WEBHOOK:
+            logger.info(f"Запуск в режиме вебхука на порту {PORT}, URL: {WEBHOOK_URL}")
+            # Запускаем бота с вебхуком
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                url_path=f"bot{TELEGRAM_TOKEN}",
+                webhook_url=WEBHOOK_URL
+            )
+        else:
+            logger.info("Запуск в режиме опроса (polling)")
+            # Запускаем бота в режиме опроса
+            application.run_polling()
+            
+    except Exception as e:
+        logger.error(f"Произошла ошибка при запуске бота: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        sys.exit(1)
 
 
 if __name__ == "__main__":
