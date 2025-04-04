@@ -59,7 +59,16 @@ def delete_webhook():
 
 def check_service_availability(url):
     """Проверяет доступность сервиса на Render перед установкой вебхука."""
+    # Формируем URL для проверки доступности
     ping_url = f"{url.rstrip('/')}/ping"
+    # Альтернативный URL с командой для бота
+    bot_ping_url = None
+    
+    if TELEGRAM_TOKEN in url:
+        # Если URL содержит токен, возможно, это полный URL для вебхука
+        # Создаем отдельный URL для команды /ping для бота
+        base_url = url.split(f"/bot{TELEGRAM_TOKEN}")[0]
+        bot_ping_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage?chat_id=YOUR_CHAT_ID&text=/ping"
     
     print(f"Проверка доступности сервиса на {ping_url}...")
     print("Это может занять некоторое время, если сервис на Render находится в спящем режиме.")
@@ -72,6 +81,7 @@ def check_service_availability(url):
             
             if response.status_code == 200:
                 print("Сервис доступен и отвечает корректно!")
+                print(f"Ответ: {response.text[:100]}...")
                 return True
             else:
                 print(f"Сервис вернул код ответа {response.status_code}")
@@ -89,8 +99,13 @@ def check_service_availability(url):
                 print(f"Ожидание {wait_time} секунд перед следующей попыткой...")
                 time.sleep(wait_time)
     
-    print("\n⚠️ Предупреждение: Сервис недоступен!")
-    print("Установка вебхука может не сработать, если сервис недоступен.")
+    print("\n⚠️ Предупреждение: Сервис недоступен через /ping!")
+    if bot_ping_url:
+        print(f"\nПопробуйте проверить доступность бота через команду /ping:")
+        print(f"URL: {bot_ping_url}")
+        print("Замените YOUR_CHAT_ID на ваш Chat ID и откройте этот URL в браузере.")
+    
+    print("\nУстановка вебхука может не сработать, если сервис недоступен.")
     
     proceed = input("Продолжить установку вебхука, несмотря на недоступность сервиса? (y/n): ")
     return proceed.lower() == 'y'

@@ -4,8 +4,6 @@ from datetime import datetime, timedelta, time as dt_time
 import pytz
 import sys
 import threading
-import http.server
-import socketserver
 import json
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -52,7 +50,8 @@ scheduler = BackgroundScheduler(timezone=pytz.timezone('Europe/Moscow'))
 
 # Получаем переменные окружения для вебхука (для Render)
 PORT = int(os.environ.get('PORT', 10000))
-CHECK_SERVER_PORT = int(os.environ.get('PORT', 8080))
+# На Render мы можем использовать только один порт, указанный в переменной PORT
+# Поэтому отдельный сервер проверки доступности не будет работать
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
@@ -73,43 +72,6 @@ USE_WEBHOOK = bool(WEBHOOK_URL)
 logger.info(f"Режим вебхука: {'Включен' if USE_WEBHOOK else 'Отключен'}")
 if USE_WEBHOOK:
     logger.info(f"Используемый URL вебхука: {WEBHOOK_URL}")
-
-# Создаем HTTP-сервер для проверки доступности
-class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/ping':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            
-            status_info = {
-                'status': 'ok',
-                'message': 'Bot is running',
-                'time': datetime.now().isoformat(),
-                'webhook_enabled': USE_WEBHOOK,
-                'webhook_url': WEBHOOK_URL if USE_WEBHOOK else None
-            }
-            
-            self.wfile.write(json.dumps(status_info).encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b'Not Found')
-    
-    def log_message(self, format, *args):
-        # Переопределяем логирование, чтобы оно шло через наш логгер
-        logger.info(f"Health check: {self.address_string()} - {format % args}")
-
-# Функция для запуска HTTP-сервера
-def start_health_check_server():
-    try:
-        health_handler = HealthCheckHandler
-        health_check_server = socketserver.TCPServer(("0.0.0.0", CHECK_SERVER_PORT), health_handler)
-        logger.info(f"Запущен HTTP-сервер для проверки доступности на порту {CHECK_SERVER_PORT}")
-        health_check_server.serve_forever()
-    except Exception as e:
-        logger.error(f"Ошибка при запуске HTTP-сервера проверки доступности: {e}")
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /start."""
@@ -413,6 +375,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик для проверки доступности бота через URL."""
+    logger.info(f"Получен запрос на проверку доступности от {update.effective_user.id if update.effective_user else 'неизвестного пользователя'}")
+    
+    status_info = {
+        'status': 'ok',
+        'message': 'Bot is running',
+        'time': datetime.now().isoformat(),
+        'webhook_enabled': USE_WEBHOOK,
+        'webhook_url': WEBHOOK_URL if USE_WEBHOOK else None
+    }
+    
+    await update.message.reply_text(
+        f"Бот работает!\n\nВремя сервера: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Режим вебхука: {'Включен' if USE_WEBHOOK else 'Отключен'}"
+    )
+
+
 def main() -> None:
     """Запуск бота."""
     try:
@@ -460,12 +440,12 @@ def main() -> None:
         # Добавление обработчиков
         application.add_handler(conv_handler)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, feedback_message))
+        # Добавляем обработчик для команды /ping
+        application.add_handler(CommandHandler("ping", ping_handler))
         logger.info("Обработчики добавлены")
         
-        # Запускаем HTTP-сервер для проверки доступности в отдельном потоке
-        if USE_WEBHOOK:
-            threading.Thread(target=start_health_check_server, daemon=True).start()
-        
+        # На Render мы можем использовать только один порт, указанный в переменной PORT
+        # Поэтому отдельный сервер проверки доступности не будет работать
         # Запускаем бота в зависимости от режима (вебхук или polling)
         if USE_WEBHOOK:
             logger.info(f"Запуск в режиме вебхука на порту {PORT}, URL: {WEBHOOK_URL}")
