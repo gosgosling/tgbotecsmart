@@ -3,6 +3,8 @@ import logging
 from datetime import datetime, timedelta, time as dt_time
 import pytz
 import sys
+from flask import Flask, request, jsonify
+import threading
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -72,46 +74,71 @@ if USE_WEBHOOK:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /start."""
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    
-    # Проверка, если пользователь уже зарегистрирован
-    session = get_session()
-    existing_user = session.query(User).filter(User.chat_id == chat_id).first()
-    
-    if existing_user:
-        # Если пользователь существует, просто приветствуем его
-        await update.message.reply_text(
-            f"Привет, {user.first_name}! Рады видеть вас снова в боте обратной связи."
+    try:
+        logger.info(f"Получена команда /start от пользователя {update.effective_user.id}")
+        
+        user = update.effective_user
+        chat_id = update.effective_chat.id
+        
+        logger.info(f"Данные пользователя: id={user.id}, username={user.username}, first_name={user.first_name}")
+        
+        # Проверка, если пользователь уже зарегистрирован
+        session = get_session()
+        existing_user = session.query(User).filter(User.chat_id == chat_id).first()
+        
+        if existing_user:
+            # Если пользователь существует, просто приветствуем его
+            logger.info(f"Пользователь {chat_id} уже существует в базе данных")
+            await update.message.reply_text(
+                f"Привет, {user.first_name}! Рады видеть вас снова в боте обратной связи."
+            )
+            # Сбросим статус пользователя, если он был в процессе регистрации
+            existing_user.is_active = True
+            session.commit()
+            session.close()
+            logger.info(f"Отправлено приветствие существующему пользователю {chat_id}")
+            return ConversationHandler.END
+        
+        # Создаем нового пользователя
+        logger.info(f"Создание нового пользователя с chat_id={chat_id}")
+        new_user = User(
+            chat_id=chat_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name
         )
-        # Сбросим статус пользователя, если он был в процессе регистрации
-        existing_user.is_active = True
+        session.add(new_user)
         session.commit()
         session.close()
+        logger.info(f"Новый пользователь {chat_id} добавлен в базу данных")
+        
+        # Отправляем приветствие
+        logger.info(f"Отправка приветствия и кнопок выбора группы пользователю {chat_id}")
+        await update.message.reply_text(
+            f"Здравствуйте, {user.first_name}! Добро пожаловать в бот обратной связи компании.\n\n"
+            "Пожалуйста, выберите вашу группу занятий:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Группа будни", callback_data="group_weekday")],
+                [InlineKeyboardButton("Группа выходного дня", callback_data="group_weekend")]
+            ])
+        )
+        logger.info(f"Приветствие с кнопками отправлено пользователю {chat_id}")
+        
+        return CHOOSING_GROUP
+    except Exception as e:
+        logger.error(f"Ошибка в обработчике start: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # Попытка отправить сообщение пользователю даже при ошибке
+        try:
+            await update.message.reply_text(
+                "Произошла ошибка при обработке команды. Пожалуйста, попробуйте позже или свяжитесь с администратором."
+            )
+        except Exception:
+            pass
+        
         return ConversationHandler.END
-    
-    # Создаем нового пользователя
-    new_user = User(
-        chat_id=chat_id,
-        username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name
-    )
-    session.add(new_user)
-    session.commit()
-    session.close()
-    
-    # Отправляем приветствие
-    await update.message.reply_text(
-        f"Здравствуйте, {user.first_name}! Добро пожаловать в бот обратной связи компании.\n\n"
-        "Пожалуйста, выберите вашу группу занятий:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Группа будни", callback_data="group_weekday")],
-            [InlineKeyboardButton("Группа выходного дня", callback_data="group_weekend")]
-        ])
-    )
-    
-    return CHOOSING_GROUP
 
 
 async def group_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -339,6 +366,28 @@ def main() -> None:
         application.add_handler(conv_handler)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, feedback_message))
         logger.info("Обработчики добавлены")
+        
+        # Запускаем Flask-сервер для проверки доступности
+        if USE_WEBHOOK:
+            # Создаем Flask-приложение для проверки работоспособности
+            app = Flask(__name__)
+            
+            @app.route('/ping', methods=['GET'])
+            def ping():
+                return jsonify({
+                    'status': 'ok',
+                    'message': 'Bot is running',
+                    'time': datetime.now().isoformat(),
+                    'webhook_enabled': USE_WEBHOOK,
+                    'webhook_url': WEBHOOK_URL
+                })
+            
+            # Запускаем Flask-сервер в отдельном потоке
+            def run_flask():
+                app.run(host='0.0.0.0', port=int(os.environ.get('FLASK_PORT', 8080)))
+                
+            threading.Thread(target=run_flask, daemon=True).start()
+            logger.info(f"Запущен HTTP-сервер на порту {os.environ.get('FLASK_PORT', 8080)} для проверки доступности")
         
         # Запускаем бота в зависимости от режима (вебхук или polling)
         if USE_WEBHOOK:
