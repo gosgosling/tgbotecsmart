@@ -52,7 +52,7 @@ scheduler = BackgroundScheduler(timezone=pytz.timezone('Europe/Moscow'))
 
 # Получаем переменные окружения для вебхука (для Render)
 PORT = int(os.environ.get('PORT', 10000))
-CHECK_SERVER_PORT = int(os.environ.get('CHECK_SERVER_PORT', 8080))
+CHECK_SERVER_PORT = int(os.environ.get('PORT', 8080))
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
@@ -114,58 +114,114 @@ def start_health_check_server():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /start."""
     try:
-        logger.info(f"Получена команда /start от пользователя {update.effective_user.id}")
+        logger.info(f"[ДИАГНОСТИКА] Начало обработки команды /start от пользователя {update.effective_user.id}")
         
         user = update.effective_user
         chat_id = update.effective_chat.id
         
-        logger.info(f"Данные пользователя: id={user.id}, username={user.username}, first_name={user.first_name}")
+        logger.info(f"[ДИАГНОСТИКА] Данные пользователя: id={user.id}, username={user.username}, first_name={user.first_name}")
         
         # Проверка, если пользователь уже зарегистрирован
-        session = get_session()
-        existing_user = session.query(User).filter(User.chat_id == chat_id).first()
+        logger.info(f"[ДИАГНОСТИКА] Попытка получения сессии базы данных")
+        try:
+            session = get_session()
+            logger.info(f"[ДИАГНОСТИКА] Сессия базы данных получена успешно")
+        except Exception as db_error:
+            logger.error(f"[ДИАГНОСТИКА] Ошибка при получении сессии базы данных: {db_error}")
+            await update.message.reply_text(
+                "Произошла ошибка при подключении к базе данных. Пожалуйста, попробуйте позже."
+            )
+            return ConversationHandler.END
+        
+        try:
+            logger.info(f"[ДИАГНОСТИКА] Поиск пользователя с chat_id={chat_id} в базе")
+            existing_user = session.query(User).filter(User.chat_id == chat_id).first()
+            logger.info(f"[ДИАГНОСТИКА] Результат поиска: {existing_user is not None}")
+        except Exception as query_error:
+            logger.error(f"[ДИАГНОСТИКА] Ошибка при поиске пользователя: {query_error}")
+            session.close()
+            await update.message.reply_text(
+                "Произошла ошибка при доступе к базе данных. Пожалуйста, попробуйте позже."
+            )
+            return ConversationHandler.END
         
         if existing_user:
             # Если пользователь существует, просто приветствуем его
-            logger.info(f"Пользователь {chat_id} уже существует в базе данных")
-            await update.message.reply_text(
-                f"Привет, {user.first_name}! Рады видеть вас снова в боте обратной связи."
-            )
+            logger.info(f"[ДИАГНОСТИКА] Пользователь {chat_id} уже существует в базе данных")
+            try:
+                await update.message.reply_text(
+                    f"Привет, {user.first_name}! Рады видеть вас снова в боте обратной связи."
+                )
+                logger.info(f"[ДИАГНОСТИКА] Сообщение приветствия отправлено существующему пользователю")
+            except Exception as msg_error:
+                logger.error(f"[ДИАГНОСТИКА] Ошибка при отправке сообщения: {msg_error}")
+            
             # Сбросим статус пользователя, если он был в процессе регистрации
-            existing_user.is_active = True
-            session.commit()
-            session.close()
-            logger.info(f"Отправлено приветствие существующему пользователю {chat_id}")
+            try:
+                existing_user.is_active = True
+                session.commit()
+                logger.info(f"[ДИАГНОСТИКА] Статус пользователя обновлен в базе данных")
+            except Exception as db_error:
+                logger.error(f"[ДИАГНОСТИКА] Ошибка при обновлении статуса пользователя: {db_error}")
+                session.rollback()
+            finally:
+                session.close()
+                logger.info(f"[ДИАГНОСТИКА] Сессия базы данных закрыта")
+            
             return ConversationHandler.END
         
         # Создаем нового пользователя
-        logger.info(f"Создание нового пользователя с chat_id={chat_id}")
-        new_user = User(
-            chat_id=chat_id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name
-        )
-        session.add(new_user)
-        session.commit()
-        session.close()
-        logger.info(f"Новый пользователь {chat_id} добавлен в базу данных")
+        logger.info(f"[ДИАГНОСТИКА] Создание нового пользователя с chat_id={chat_id}")
+        try:
+            new_user = User(
+                chat_id=chat_id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name
+            )
+            session.add(new_user)
+            session.commit()
+            logger.info(f"[ДИАГНОСТИКА] Новый пользователь успешно добавлен в базу данных")
+        except Exception as db_error:
+            logger.error(f"[ДИАГНОСТИКА] Ошибка при создании нового пользователя: {db_error}")
+            session.rollback()
+            try:
+                await update.message.reply_text(
+                    "Произошла ошибка при регистрации. Пожалуйста, попробуйте позже."
+                )
+            except Exception:
+                pass
+            session.close()
+            return ConversationHandler.END
+        finally:
+            session.close()
+            logger.info(f"[ДИАГНОСТИКА] Сессия базы данных закрыта после создания пользователя")
         
         # Отправляем приветствие
-        logger.info(f"Отправка приветствия и кнопок выбора группы пользователю {chat_id}")
-        await update.message.reply_text(
-            f"Здравствуйте, {user.first_name}! Добро пожаловать в бот обратной связи компании.\n\n"
-            "Пожалуйста, выберите вашу группу занятий:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Группа будни", callback_data="group_weekday")],
-                [InlineKeyboardButton("Группа выходного дня", callback_data="group_weekend")]
-            ])
-        )
-        logger.info(f"Приветствие с кнопками отправлено пользователю {chat_id}")
+        logger.info(f"[ДИАГНОСТИКА] Отправка приветствия и кнопок выбора группы пользователю {chat_id}")
+        try:
+            await update.message.reply_text(
+                f"Здравствуйте, {user.first_name}! Добро пожаловать в бот обратной связи компании.\n\n"
+                "Пожалуйста, выберите вашу группу занятий:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Группа будни", callback_data="group_weekday")],
+                    [InlineKeyboardButton("Группа выходного дня", callback_data="group_weekend")]
+                ])
+            )
+            logger.info(f"[ДИАГНОСТИКА] Приветствие с кнопками успешно отправлено")
+        except Exception as msg_error:
+            logger.error(f"[ДИАГНОСТИКА] Ошибка при отправке приветствия: {msg_error}")
+            try:
+                await update.message.reply_text(
+                    "Произошла ошибка при отправке кнопок. Пожалуйста, попробуйте команду /start снова."
+                )
+            except Exception:
+                pass
+            return ConversationHandler.END
         
         return CHOOSING_GROUP
     except Exception as e:
-        logger.error(f"Ошибка в обработчике start: {e}")
+        logger.error(f"[ДИАГНОСТИКА] Необработанная ошибка в обработчике start: {e}")
         import traceback
         logger.error(traceback.format_exc())
         
@@ -174,8 +230,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             await update.message.reply_text(
                 "Произошла ошибка при обработке команды. Пожалуйста, попробуйте позже или свяжитесь с администратором."
             )
-        except Exception:
-            pass
+        except Exception as msg_error:
+            logger.error(f"[ДИАГНОСТИКА] Невозможно отправить сообщение об ошибке: {msg_error}")
         
         return ConversationHandler.END
 
