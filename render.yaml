@@ -3,7 +3,7 @@ services:
     name: feedback-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    startCommand: python setup_render.py && python bot.py
     plan: free  # Free tier
     # Лучше указать больше ресурсов, если доступно:
     # plan: standard

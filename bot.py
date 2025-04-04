@@ -19,6 +19,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
+from sqlalchemy import text
 
 from database import User, Schedule, get_session, init_schedule, DB_READY, add_manager, get_manager_by_telegram_id, get_all_managers, add_feedback_request, check_and_schedule_feedback_requests, check_database_connection, safe_execute_query
 from utils import parse_date, format_date, get_current_moscow_time, get_weekday
@@ -109,10 +110,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         try:
             # Используем безопасное выполнение запроса
             def check_user_exists(s):
-                # Используем text() для защиты от SQL инъекций и соответствия требованиям SQLAlchemy 2.0
-                query = text("SELECT id, is_active FROM users WHERE chat_id = :chat_id")
-                result = s.execute(query, {"chat_id": chat_id}).fetchone()
-                return result
+                try:
+                    # Проверяем наличие функции text в текущем контексте
+                    if 'text' not in globals() and 'text' not in locals():
+                        from sqlalchemy import text as sql_text
+                        query = sql_text("SELECT id, is_active FROM users WHERE chat_id = :chat_id")
+                    else:
+                        # Используем text() для защиты от SQL инъекций и соответствия требованиям SQLAlchemy 2.0
+                        query = text("SELECT id, is_active FROM users WHERE chat_id = :chat_id")
+                    
+                    result = s.execute(query, {"chat_id": chat_id}).fetchone()
+                    return result
+                except NameError as e:
+                    # Обрабатываем ошибку отсутствия функции text
+                    logger.error(f"[ДИАГНОСТИКА] Ошибка импорта 'text': {e}")
+                    from sqlalchemy import text as sql_text
+                    query = sql_text("SELECT id, is_active FROM users WHERE chat_id = :chat_id")
+                    result = s.execute(query, {"chat_id": chat_id}).fetchone()
+                    return result
+                except Exception as e:
+                    logger.error(f"[ДИАГНОСТИКА] Ошибка при проверке пользователя: {e}")
+                    return None
             
             existing_user = safe_execute_query(session, check_user_exists)
             
@@ -154,9 +172,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 try:
                     # Используем безопасное выполнение запроса для обновления
                     def update_user_status(s):
-                        query = text("UPDATE users SET is_active = :is_active WHERE chat_id = :chat_id")
-                        s.execute(query, {"is_active": True, "chat_id": chat_id})
-                        s.commit()
+                        try:
+                            # Проверяем наличие функции text в текущем контексте
+                            if 'text' not in globals() and 'text' not in locals():
+                                from sqlalchemy import text as sql_text
+                                query = sql_text("UPDATE users SET is_active = :is_active WHERE chat_id = :chat_id")
+                            else:
+                                query = text("UPDATE users SET is_active = :is_active WHERE chat_id = :chat_id")
+                                
+                            s.execute(query, {"is_active": True, "chat_id": chat_id})
+                            s.commit()
+                        except NameError as e:
+                            # Обрабатываем ошибку отсутствия функции text
+                            logger.error(f"[ДИАГНОСТИКА] Ошибка импорта 'text': {e}")
+                            from sqlalchemy import text as sql_text
+                            query = sql_text("UPDATE users SET is_active = :is_active WHERE chat_id = :chat_id")
+                            s.execute(query, {"is_active": True, "chat_id": chat_id})
+                            s.commit()
+                        except Exception as e:
+                            logger.error(f"[ДИАГНОСТИКА] Ошибка при обновлении статуса пользователя: {e}")
+                            s.rollback()
+                            raise
                     
                     safe_execute_query(session, update_user_status)
                     logger.info(f"[ДИАГНОСТИКА] Статус пользователя обновлен в базе данных")
@@ -189,15 +225,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         logger.info(f"[ДИАГНОСТИКА] Создание нового пользователя с chat_id={chat_id}")
         try:
             def create_new_user(s):
-                new_user = User(
-                    chat_id=chat_id,
-                    username=user.username,
-                    first_name=user.first_name,
-                    last_name=user.last_name
-                )
-                s.add(new_user)
-                s.commit()
-                return True
+                try:
+                    # В этой функции мы используем ORM модель User, поэтому text() не требуется
+                    new_user = User(
+                        chat_id=chat_id,
+                        username=user.username,
+                        first_name=user.first_name,
+                        last_name=user.last_name
+                    )
+                    s.add(new_user)
+                    s.commit()
+                    return True
+                except Exception as e:
+                    logger.error(f"[ДИАГНОСТИКА] Ошибка при создании нового пользователя: {e}")
+                    try:
+                        s.rollback()
+                    except:
+                        pass
+                    return False
             
             user_created = safe_execute_query(session, create_new_user)
             
