@@ -24,9 +24,16 @@ if DATABASE_URL.startswith('postgres://'):
 logger.info(f"Используется база данных: {DATABASE_URL.split('://')[0]}")
 
 # Создание движка SQLAlchemy
-engine = create_engine(DATABASE_URL)
-Base = declarative_base()
-Session = sessionmaker(bind=engine)
+try:
+    logger.info(f"Создание движка SQLAlchemy для подключения к БД: {DATABASE_URL.split('://')[0]}")
+    engine = create_engine(DATABASE_URL, echo=False)
+    Base = declarative_base()
+    Session = sessionmaker(bind=engine)
+    logger.info("Движок SQLAlchemy создан успешно")
+except Exception as e:
+    logger.error(f"Критическая ошибка при создании движка SQLAlchemy: {e}")
+    # Не будем здесь применять sys.exit, т.к. это приведет к падению всего приложения
+    # Вместо этого обработаем ошибки в функциях ниже
 
 
 class User(Base):
@@ -64,15 +71,29 @@ def create_tables():
     try:
         Base.metadata.create_all(engine)
         logger.info("Таблицы успешно созданы")
+        return True
     except Exception as e:
         logger.error(f"Ошибка при создании таблиц: {e}")
-        raise
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
 
 
 # Инициализация расписания по умолчанию
 def init_schedule():
+    """Инициализирует расписание по умолчанию и возвращает True в случае успеха."""
     logger.info("Инициализация расписания...")
-    session = Session()
+    
+    # Проверяем соединение с базой данных
+    if not check_database_connection():
+        logger.error("Не удалось инициализировать расписание: база данных недоступна")
+        return False
+    
+    try:
+        session = Session()
+    except Exception as e:
+        logger.error(f"Не удалось создать сессию для инициализации расписания: {e}")
+        return False
     
     try:
         # Проверяем, есть ли уже расписание
@@ -91,18 +112,50 @@ def init_schedule():
             logger.info("Расписание успешно инициализировано")
         else:
             logger.info("Расписание уже существует, инициализация не требуется")
+        
+        return True
     except Exception as e:
         logger.error(f"Ошибка при инициализации расписания: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         session.rollback()
-        raise
+        return False
     finally:
         session.close()
 
 
+# Добавим функцию для проверки соединения с базой данных
+def check_database_connection():
+    """Проверяет соединение с базой данных."""
+    logger.info("Проверка соединения с базой данных...")
+    try:
+        # Простой запрос для проверки соединения
+        connection = engine.connect()
+        connection.close()
+        logger.info("Соединение с базой данных успешно установлено")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при подключении к базе данных: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
+
 def get_session():
     """Получить сессию базы данных."""
-    return Session()
+    try:
+        session = Session()
+        # Проверяем работоспособность сессии
+        session.execute("SELECT 1")
+        return session
+    except Exception as e:
+        logger.error(f"Ошибка при создании сессии: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        # Если ошибка связана с базой данных, вернем None, иначе пробросим исключение
+        raise
 
 
-# При импорте модуля, создаем таблицы
-create_tables() 
+# При импорте модуля, проверяем подключение к БД и создаем таблицы
+DB_READY = check_database_connection() and create_tables() 
+# Флаг DB_READY будем использовать в основном коде для проверки готовности БД 

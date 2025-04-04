@@ -16,7 +16,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 
-from database import User, Schedule, get_session, init_schedule
+from database import User, Schedule, get_session, init_schedule, DB_READY
 from utils import parse_date, format_date, get_current_moscow_time, get_weekday
 
 # Настройка логирования
@@ -83,15 +83,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         
         logger.info(f"[ДИАГНОСТИКА] Данные пользователя: id={user.id}, username={user.username}, first_name={user.first_name}")
         
-        # Проверка, если пользователь уже зарегистрирован
-        logger.info(f"[ДИАГНОСТИКА] Попытка получения сессии базы данных")
+        # Проверяем готовность базы данных
+        db_ready = hasattr(sys.modules['database'], 'DB_READY') and sys.modules['database'].DB_READY
+        
+        # Если база данных не готова, работаем в упрощенном режиме
+        if not db_ready:
+            logger.warning("[ДИАГНОСТИКА] База данных не готова, работаем в упрощенном режиме")
+            await update.message.reply_text(
+                f"Привет, {user.first_name}! Добро пожаловать в бот обратной связи.\n\n"
+                "В данный момент система работает в ограниченном режиме из-за технического обслуживания.\n"
+                "Вы можете отправлять сообщения с обратной связью, они будут доставлены менеджеру.\n\n"
+                "Для проверки работы бота используйте команду /ping."
+            )
+            return ConversationHandler.END
+        
+        # Стандартная обработка с базой данных
         try:
             session = get_session()
+            if session is None:
+                logger.error("[ДИАГНОСТИКА] Не удалось получить сессию базы данных")
+                await update.message.reply_text(
+                    f"Привет, {user.first_name}! В данный момент система испытывает технические проблемы.\n"
+                    "Пожалуйста, попробуйте позже или свяжитесь с администратором."
+                )
+                return ConversationHandler.END
+                
             logger.info(f"[ДИАГНОСТИКА] Сессия базы данных получена успешно")
         except Exception as db_error:
-            logger.error(f"[ДИАГНОСТИКА] Ошибка при получении сессии базы данных: {db_error}")
+            logger.error(f"[ДИАГНОСТИКА] Критическая ошибка при получении сессии базы данных: {db_error}")
             await update.message.reply_text(
-                "Произошла ошибка при подключении к базе данных. Пожалуйста, попробуйте позже."
+                f"Привет, {user.first_name}! В данный момент система испытывает технические проблемы.\n"
+                "Пожалуйста, попробуйте позже или свяжитесь с администратором."
             )
             return ConversationHandler.END
         
@@ -270,30 +292,42 @@ async def start_date_entered(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def feedback_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик получения сообщения с обратной связью."""
-    message = update.message.text
-    user = update.effective_user
-    
-    # Отправляем благодарность пользователю
-    await update.message.reply_text(
-        "Спасибо за вашу обратную связь! Ваше мнение очень важно для нас."
-    )
-    
-    # Отправляем сообщение менеджеру
-    if MANAGER_CHAT_ID:
+    try:
+        message = update.message.text
+        user = update.effective_user
+        
+        logger.info(f"Получена обратная связь от пользователя {user.id}: {message[:50]}...")
+        
+        # Отправляем благодарность пользователю
+        await update.message.reply_text(
+            "Спасибо за вашу обратную связь! Ваше мнение очень важно для нас."
+        )
+        
+        # Отправляем сообщение менеджеру
+        if MANAGER_CHAT_ID:
+            try:
+                manager_message = (
+                    f"Новая обратная связь от пользователя:\n"
+                    f"Имя: {user.first_name} {user.last_name or ''}\n"
+                    f"Username: @{user.username or 'нет'}\n"
+                    f"ID: {user.id}\n\n"
+                    f"Сообщение:\n{message}"
+                )
+                await context.bot.send_message(
+                    chat_id=MANAGER_CHAT_ID,
+                    text=manager_message
+                )
+                logger.info(f"Обратная связь от пользователя {user.id} отправлена менеджеру")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке сообщения менеджеру: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка при обработке обратной связи: {e}")
         try:
-            manager_message = (
-                f"Новая обратная связь от пользователя:\n"
-                f"Имя: {user.first_name} {user.last_name or ''}\n"
-                f"Username: @{user.username or 'нет'}\n"
-                f"ID: {user.id}\n\n"
-                f"Сообщение:\n{message}"
+            await update.message.reply_text(
+                "Произошла ошибка при обработке вашего сообщения. Пожалуйста, попробуйте позже."
             )
-            await context.bot.send_message(
-                chat_id=MANAGER_CHAT_ID,
-                text=manager_message
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при отправке сообщения менеджеру: {e}")
+        except Exception:
+            pass
 
 
 async def send_feedback_request(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -398,29 +432,35 @@ def main() -> None:
     try:
         # Инициализация расписания в базе данных
         logger.info("Инициализация расписания...")
-        init_schedule()
+        schedule_initialized = init_schedule()
+        if not schedule_initialized:
+            logger.warning("Инициализация расписания не удалась. Бот будет запущен, но функциональность может быть ограничена.")
         
         # Текущее время для проверки
         now = datetime.now(pytz.timezone('Europe/Moscow'))
         logger.info(f"Текущее время системы: {now}")
         
         # Настройка планировщика для проверки расписаний каждые 10 минут
-        scheduler.add_job(
-            check_and_schedule_feedback_requests,
-            IntervalTrigger(minutes=10),
-            id='check_schedule'
-        )
-        
-        # Также выполняем проверку при запуске через 30 секунд
-        scheduler.add_job(
-            check_and_schedule_feedback_requests,
-            'date',
-            run_date=now + timedelta(seconds=30),
-            id='initial_check'
-        )
-        
-        scheduler.start()
-        logger.info("Планировщик запущен")
+        # Добавляем задачу только если база данных работает нормально
+        if schedule_initialized:
+            scheduler.add_job(
+                check_and_schedule_feedback_requests,
+                IntervalTrigger(minutes=10),
+                id='check_schedule'
+            )
+            
+            # Также выполняем проверку при запуске через 30 секунд
+            scheduler.add_job(
+                check_and_schedule_feedback_requests,
+                'date',
+                run_date=now + timedelta(seconds=30),
+                id='initial_check'
+            )
+            
+            scheduler.start()
+            logger.info("Планировщик запущен")
+        else:
+            logger.warning("Планировщик не запущен из-за проблем с базой данных")
         
         # Создание приложения бота
         application = Application.builder().token(TELEGRAM_TOKEN).build()
