@@ -41,6 +41,7 @@ CHOOSING_GROUP, ENTERING_START_DATE = range(2)
 # Токен бота и ID чата менеджера из переменных окружения
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 MANAGER_CHAT_ID = os.getenv('MANAGER_CHAT_ID')
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///feedback_bot.db')
 
 if not TELEGRAM_TOKEN:
     logger.error("Токен Telegram не найден в переменных окружения!")
@@ -48,6 +49,7 @@ if not TELEGRAM_TOKEN:
 
 logger.info(f"Используется токен: {TELEGRAM_TOKEN[:5]}...{TELEGRAM_TOKEN[-5:]}")
 logger.info(f"ID менеджера: {MANAGER_CHAT_ID}")
+logger.info(f"URL базы данных: {DATABASE_URL.split('://')[0]}://**********")
 
 # Инициализация глобального планировщика
 scheduler = BackgroundScheduler(timezone=pytz.timezone('Europe/Moscow'))
@@ -113,23 +115,59 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 try:
                     # Проверяем наличие функции text в текущем контексте
                     if 'text' not in globals() and 'text' not in locals():
+                        logger.info("[ДИАГНОСТИКА] Импортируем text из SQLAlchemy (отсутствует в текущем контексте)")
                         from sqlalchemy import text as sql_text
                         query = sql_text("SELECT id, is_active FROM users WHERE chat_id = :chat_id")
                     else:
                         # Используем text() для защиты от SQL инъекций и соответствия требованиям SQLAlchemy 2.0
+                        logger.info("[ДИАГНОСТИКА] Используем существующий импорт text")
                         query = text("SELECT id, is_active FROM users WHERE chat_id = :chat_id")
                     
+                    logger.info(f"[ДИАГНОСТИКА] Выполняем запрос: {query} с параметрами chat_id={chat_id}")
                     result = s.execute(query, {"chat_id": chat_id}).fetchone()
+                    logger.info(f"[ДИАГНОСТИКА] Результат запроса: {result}")
                     return result
                 except NameError as e:
                     # Обрабатываем ошибку отсутствия функции text
                     logger.error(f"[ДИАГНОСТИКА] Ошибка импорта 'text': {e}")
+                    logger.error(f"[ДИАГНОСТИКА] Пытаемся импортировать text явно")
                     from sqlalchemy import text as sql_text
                     query = sql_text("SELECT id, is_active FROM users WHERE chat_id = :chat_id")
                     result = s.execute(query, {"chat_id": chat_id}).fetchone()
                     return result
                 except Exception as e:
                     logger.error(f"[ДИАГНОСТИКА] Ошибка при проверке пользователя: {e}")
+                    import traceback
+                    logger.error(f"[ДИАГНОСТИКА] Трассировка ошибки: {traceback.format_exc()}")
+                    # Проверяем доступность таблицы users
+                    try:
+                        # Определяем тип базы данных
+                        if DATABASE_URL and 'sqlite' in DATABASE_URL.lower():
+                            # SQLite
+                            tables_query = text("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+                        else:
+                            # PostgreSQL
+                            tables_query = text("SELECT table_name FROM information_schema.tables WHERE table_name='users'")
+                        
+                        tables = s.execute(tables_query).fetchall()
+                        logger.info(f"[ДИАГНОСТИКА] Доступные таблицы: {tables}")
+                        
+                        # Проверка структуры таблицы users
+                        try:
+                            if tables:
+                                if DATABASE_URL and 'sqlite' in DATABASE_URL.lower():
+                                    # SQLite
+                                    structure_query = text("PRAGMA table_info(users)")
+                                else:
+                                    # PostgreSQL
+                                    structure_query = text("SELECT column_name, data_type FROM information_schema.columns WHERE table_name='users'")
+                                
+                                columns = s.execute(structure_query).fetchall()
+                                logger.info(f"[ДИАГНОСТИКА] Структура таблицы users: {columns}")
+                        except Exception as struct_error:
+                            logger.error(f"[ДИАГНОСТИКА] Ошибка при проверке структуры таблицы: {struct_error}")
+                    except Exception as table_error:
+                        logger.error(f"[ДИАГНОСТИКА] Ошибка при проверке таблиц: {table_error}")
                     return None
             
             existing_user = safe_execute_query(session, check_user_exists)
@@ -893,70 +931,90 @@ def setup_scheduler():
 
 
 def start_health_check_server(port=8080):
-    """
-    Запускает простой HTTP-сервер для проверки работоспособности бота.
-    Этот сервер будет отвечать на запросы /ping и используется для проверки
-    работоспособности сервиса на платформах, таких как Render.
+    """Запускает HTTP-сервер для проверки работоспособности системы.
     
-    Args:
-        port (int): Порт для запуска HTTP-сервера. По умолчанию 8080.
+    Если Flask доступен, использует его, иначе использует встроенный HTTP-сервер.
+    Поддерживает эндпоинты:
+    - /ping - возвращает JSON-ответ о статусе сервера
+    - /health - более подробную информацию о состоянии системы
     """
-    # Импортируем threading здесь, чтобы он был доступен везде в функции
-    import threading
-    
+    # Проверка доступности Flask
+    flask_available = False
     try:
-        # Пробуем использовать Flask, если он доступен
-        from flask import Flask, jsonify
-        
-        app = Flask(__name__)
-        
-        @app.route('/ping', methods=['GET'])
-        def ping():
-            """Простой эндпоинт для проверки работоспособности сервиса."""
-            status = "активен" if DB_READY else "активен, но база данных недоступна"
-            return jsonify({
-                'status': status,
-                'message': 'Бот телеграм запущен и работает',
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'webhook_enabled': USE_WEBHOOK,
-                'webhook_url': WEBHOOK_URL if USE_WEBHOOK else None
-            })
-        
-        # Запускаем Flask в отдельном потоке
-        def run_flask_app():
-            try:
-                app.run(host='0.0.0.0', port=port)
-            except Exception as e:
-                logger.error(f"Ошибка при запуске HTTP-сервера для проверки работоспособности: {e}")
-        
-        # Запускаем в фоновом режиме
-        thread = threading.Thread(target=run_flask_app)
-        thread.daemon = True  # Поток будет автоматически завершен при закрытии основного потока
-        thread.start()
-        logger.info(f"HTTP-сервер для проверки работоспособности (Flask) запущен на порту {port}")
-    
+        import flask
+        flask_available = True
+        logger.info("Flask доступен и будет использован для сервера проверки здоровья")
     except ImportError:
-        # Если Flask не установлен, используем встроенный HTTP-сервер
-        logger.warning("Flask не установлен, используем встроенный http.server для проверки работоспособности")
-        
-        class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
-            def _set_headers(self):
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
+        logger.info("Flask не доступен, будет использован встроенный HTTP-сервер")
+    
+    # Используем Flask, если он доступен
+    if flask_available:
+        try:
+            from flask import Flask, jsonify
             
+            app = Flask(__name__)
+            
+            @app.route('/ping')
+            def ping():
+                return jsonify({
+                    'status': 'ok',
+                    'message': 'Бот работает',
+                    'timestamp': datetime.now().isoformat()
+                }), 200
+            
+            @app.route('/health')
+            def health():
+                # Проверка состояния бота
+                bot_status = {
+                    'status': 'ok',
+                    'message': 'Бот запущен и работает',
+                    'timestamp': datetime.now().isoformat(),
+                    'webhook_mode': bool(os.getenv('WEBHOOK_URL')),
+                    'database': check_database_health()
+                }
+                return jsonify(bot_status), 200
+            
+            # Запускаем в отдельном потоке
+            threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port, debug=False), daemon=True).start()
+            logger.info(f"Flask-сервер для проверки работоспособности запущен на порту {port}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при запуске Flask-сервера для проверки работоспособности: {e}")
+            logger.error(traceback.format_exc())
+    
+    # Если Flask недоступен или произошла ошибка, используем встроенный сервер
+    else:
+        class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 if self.path == '/ping':
-                    self._set_headers()
-                    status = "активен" if DB_READY else "активен, но база данных недоступна"
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    
                     response = {
-                        'status': status,
-                        'message': 'Бот телеграм запущен и работает',
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'webhook_enabled': USE_WEBHOOK,
-                        'webhook_url': WEBHOOK_URL if USE_WEBHOOK else None
+                        'status': 'ok',
+                        'message': 'Бот работает',
+                        'timestamp': datetime.now().isoformat()
                     }
-                    self.wfile.write(json.dumps(response).encode())
+                    
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                
+                elif self.path == '/health':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    
+                    # Проверка состояния бота
+                    bot_status = {
+                        'status': 'ok',
+                        'message': 'Бот запущен и работает',
+                        'timestamp': datetime.now().isoformat(),
+                        'webhook_mode': bool(os.getenv('WEBHOOK_URL')),
+                        'database': check_database_health()
+                    }
+                    
+                    self.wfile.write(json.dumps(bot_status).encode('utf-8'))
+                
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -967,89 +1025,181 @@ def start_health_check_server(port=8080):
                 logger.info(f"HTTP-сервер для проверки работоспособности (simple) запущен на порту {port}")
                 server.serve_forever()
             except Exception as e:
-                logger.error(f"Ошибка при запуске простого HTTP-сервера: {e}")
+                logger.error(f"Ошибка при запуске HTTP-сервера для проверки работоспособности: {e}")
+                logger.error(traceback.format_exc())
         
-        thread = threading.Thread(target=run_simple_server)
-        thread.daemon = True
-        thread.start()
-        logger.info(f"HTTP-сервер для проверки работоспособности запущен на порту {port}")
-    
+        # Запускаем в отдельном потоке
+        threading.Thread(target=run_simple_server, daemon=True).start()
+
+def check_database_health():
+    """Проверяет состояние подключения к базе данных."""
+    try:
+        # Проверка соединения с БД
+        db_connected = check_database_connection()
+        
+        # Проверка наличия таблиц
+        tables_exist = False
+        try:
+            from sqlalchemy import create_engine, text
+            engine = create_engine(DATABASE_URL, echo=False)
+            
+            with engine.connect() as connection:
+                # Используем соответствующий запрос в зависимости от типа базы данных
+                if 'sqlite' in DATABASE_URL:
+                    # SQLite
+                    result = connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+                else:
+                    # PostgreSQL
+                    result = connection.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))
+                
+                tables = [row[0] for row in result]
+                tables_exist = len(tables) > 0
+                
+        except Exception as e:
+            logger.error(f"Ошибка при проверке таблиц в базе данных: {e}")
+        
+        return {
+            'connected': db_connected,
+            'tables_exist': tables_exist,
+            'ready': DB_READY
+        }
+        
     except Exception as e:
-        logger.error(f"Невозможно запустить HTTP-сервер для проверки работоспособности: {e}")
-        import traceback
+        logger.error(f"Ошибка при проверке здоровья базы данных: {e}")
         logger.error(traceback.format_exc())
+        return {
+            'connected': False,
+            'tables_exist': False,
+            'ready': False,
+            'error': str(e)
+        }
+
+def create_db_tables():
+    """Создает таблицы в базе данных, если они не существуют."""
+    import traceback
+    logging.info("Проверка и создание таблиц в базе данных...")
+    
+    try:
+        # Проверка на PostgreSQL URL от Render (который начинается с postgres://)
+        # SQLAlchemy 2.0+ требует postgresql:// вместо postgres://
+        db_url = DATABASE_URL
+        if db_url.startswith('postgres://'):
+            db_url = db_url.replace('postgres://', 'postgresql://', 1)
+            logging.info("URL базы данных преобразован из postgres:// в postgresql://")
+            
+        # Создание движка SQLAlchemy
+        from sqlalchemy import create_engine
+        engine = create_engine(db_url, echo=False)
+        
+        # Импортируем базовый класс и создаем таблицы
+        from database import Base
+        Base.metadata.create_all(engine)
+        logging.info("Таблицы созданы или уже существуют")
+        
+        # Проверяем, существуют ли таблицы
+        with engine.connect() as connection:
+            # Используем соответствующий запрос в зависимости от типа базы данных
+            if 'sqlite' in db_url:
+                # SQLite
+                result = connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+            else:
+                # PostgreSQL
+                result = connection.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))
+            
+            tables = [row[0] for row in result]
+            logging.info(f"Доступные таблицы: {tables}")
+            
+            if len(tables) > 0:
+                logging.info("✅ Таблицы существуют в базе данных")
+                return True
+            else:
+                logging.warning("⚠️ Таблицы не найдены в базе данных")
+                return False
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка при проверке и создании таблиц: {e}")
+        logging.error(traceback.format_exc())
+        return False
+
+def setup_logging():
+    """Настраивает логгирование для бота."""
+    logging.basicConfig(
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        level=logging.INFO,
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    logging.getLogger('apscheduler').setLevel(logging.WARNING)
+    logging.getLogger('telegram').setLevel(logging.INFO)
+    
+    # Уровень логгирования основного логгера
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    
+    # Проверяем режим отладки
+    if os.getenv('DEBUG', 'False').lower() == 'true':
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Включен режим отладки, установлен уровень логгирования DEBUG")
+    
+    return logger
 
 def main() -> None:
     """Запуск бота."""
-    try:
-        logger.info(f"Запуск бота в {'webhook' if USE_WEBHOOK else 'polling'} режиме")
-        
-        # Проверка соединения с базой данных и инициализация расписания
-        if check_database_connection():
-            scheduler, should_run_scheduler = setup_scheduler()
-            
-            if should_run_scheduler:
-                logger.info("Запуск планировщика")
-                scheduler.start()
-                logger.info("Планировщик запущен")
-            else:
-                logger.warning("Планировщик не запущен из-за проблем с базой данных")
-        
-        # Проверяем статус вебхука перед запуском
-        check_webhook_status()
-        
-        # Создание и настройка приложения
-        application = setup_application()
-        logger.info("Приложение настроено и готово к запуску")
-        
-        # Запуск сервера проверки работоспособности
-        logger.info("Запуск сервера проверки работоспособности")
-        start_health_check_server(port=8080)
-        
-        if USE_WEBHOOK:
-            # Для Render обеспечиваем корректный путь без повторения токена
-            if WEBHOOK_URL and "onrender.com" in WEBHOOK_URL:
-                # Извлекаем базовый URL без пути
-                base_url = '/'.join(WEBHOOK_URL.split('/')[:3])
-                
-                # Получаем только последнюю часть пути (предполагается, что это токен)
-                path_parts = WEBHOOK_URL.split('/')
-                if len(path_parts) > 3:
-                    webhook_path = '/' + '/'.join(path_parts[3:])
-                    logger.info(f"Используем путь вебхука: {webhook_path}")
-                else:
-                    webhook_path = f"/bot{TELEGRAM_TOKEN}"
-                    logger.info(f"Используем стандартный путь вебхука: {webhook_path}")
-                
-                # Запуск бота с вебхуком, используя правильный путь
-                logger.info(f"Запуск веб-сервера на порту {PORT} с путем вебхука {webhook_path}")
-                application.run_webhook(
-                    listen="0.0.0.0",
-                    port=PORT,
-                    url_path=webhook_path,
-                    webhook_url=WEBHOOK_URL
-                )
-            else:
-                # Стандартный случай запуска вебхука
-                webhook_path = f"/bot{TELEGRAM_TOKEN}"
-                logger.info(f"Запуск веб-сервера на порту {PORT} с путем вебхука {webhook_path}")
-                
-                application.run_webhook(
-                    listen="0.0.0.0",
-                    port=PORT,
-                    url_path=webhook_path,
-                    webhook_url=WEBHOOK_URL
-                )
-        else:
-            # Запуск через long polling
-            logger.info("Запуск через long polling")
-            application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Получение глобальных переменных
+    global DB_READY
+
+    # Загрузка переменных окружения и настройка логгирования
+    load_dotenv()  # Читаем .env файл
+    setup_logging()
     
-    except Exception as e:
-        logger.error(f"Критическая ошибка при запуске бота: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    # Проверка и настройка базы данных
+    logging.info("Проверка соединения с базой данных...")
+    if DATABASE_URL.startswith('postgres://'):
+        # Исправляем URL для совместимости с SQLAlchemy 2.0+
+        global DATABASE_URL
+        DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+        logging.info("URL базы данных преобразован из postgres:// в postgresql://")
+    
+    # Создаем таблицы в базе данных, если они не существуют
+    create_db_tables()
+    
+    # Устанавливаем флаг готовности базы данных
+    DB_READY = True
+    
+    # Получаем токен и создаем экземпляр приложения
+    token = os.getenv('TELEGRAM_TOKEN')
+    if not token:
+        logging.error("Токен не найден. Укажите TELEGRAM_TOKEN в .env файле.")
         sys.exit(1)
+    
+    # Проверка запуска в режиме вебхука или локального поллинга
+    webhook_url = os.getenv('WEBHOOK_URL')
+    
+    # Создание и настройка приложения
+    application = ApplicationBuilder().token(token).build()
+    setup_application(application)
+    
+    # Запуск сервера для проверки здоровья системы
+    try:
+        start_health_check_server()
+    except Exception as e:
+        logging.error(f"Не удалось запустить сервер проверки здоровья: {e}")
+    
+    # Запуск бота
+    if webhook_url:
+        # Режим вебхука (для Render)
+        logging.info(f"Запускаем бота в режиме вебхука на {webhook_url}")
+        port = int(os.getenv('PORT', 8443))
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=f"/{token}",
+            webhook_url=webhook_url
+        )
+    else:
+        # Режим поллинга (для локальной разработки)
+        logging.info("Запускаем бота в режиме поллинга (локальная разработка)")
+        application.run_polling()
 
 
 if __name__ == "__main__":

@@ -6,40 +6,48 @@ import sys
 import logging
 import requests
 import time
-from datetime import datetime
-from sqlalchemy import create_engine, text
+import datetime
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
 
-# Настройка логирования
+# Настройка логгирования
 logging.basicConfig(
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("setup_render")
 
 # Загрузка переменных окружения
 load_dotenv()
-logger.info("Переменные окружения загружены")
 
-# Получение данных из переменных окружения
+# Получение важных переменных окружения
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-DATABASE_URL = os.getenv('DATABASE_URL')
-RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
-RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///feedback_bot.db')
+RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL')
+RENDER_EXTERNAL_HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME')
 
-# Проверяем обязательные переменные
+# Проверка наличия обязательных переменных
 if not TELEGRAM_TOKEN:
-    logger.error("Ошибка: TELEGRAM_TOKEN не найден в переменных окружения")
+    logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Переменная TELEGRAM_TOKEN не задана!")
     sys.exit(1)
 
 if not DATABASE_URL:
-    logger.error("Ошибка: DATABASE_URL не найден в переменных окружения")
+    logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Переменная DATABASE_URL не задана!")
     sys.exit(1)
 
-# Логируем основные переменные
-logger.info(f"Токен: {TELEGRAM_TOKEN[:5]}...{TELEGRAM_TOKEN[-5:]}")
-logger.info(f"URL базы данных: {DATABASE_URL.split('://', 1)[0]}://****")
+# Маскировка токена для логов
+def mask_token(token):
+    if not token:
+        return None
+    return token[:4] + "..." + token[-4:] if len(token) > 8 else "***"
+
+logger.info(f"Проверка настройки для Render...")
+logger.info(f"TELEGRAM_TOKEN: {mask_token(TELEGRAM_TOKEN)}")
+logger.info(f"DATABASE_URL: {'sqlite:///...' if 'sqlite' in DATABASE_URL else DATABASE_URL.split('@')[0] + '@***'}")
 logger.info(f"WEBHOOK_URL: {WEBHOOK_URL}")
 logger.info(f"RENDER_EXTERNAL_URL: {RENDER_EXTERNAL_URL}")
 logger.info(f"RENDER_EXTERNAL_HOSTNAME: {RENDER_EXTERNAL_HOSTNAME}")
@@ -133,7 +141,7 @@ def check_webhook_status():
                 # Конвертация UNIX timestamp в читаемую дату
                 last_error_date = webhook_info.get('last_error_date')
                 if last_error_date:
-                    error_time = datetime.fromtimestamp(last_error_date).strftime('%Y-%m-%d %H:%M:%S')
+                    error_time = datetime.datetime.fromtimestamp(last_error_date).strftime('%Y-%m-%d %H:%M:%S')
                     logger.error(f"⏰ Время ошибки: {error_time}")
             else:
                 logger.info("✅ Ошибок вебхука не обнаружено")
@@ -196,6 +204,121 @@ def set_webhook():
         logger.error(f"❌ Ошибка при подключении к API Telegram: {e}")
         return False
 
+def create_tables_if_not_exist():
+    """Создает таблицы в базе данных, если они не существуют."""
+    logger.info("Проверка и создание таблиц в базе данных...")
+    
+    try:
+        # Проверка на PostgreSQL URL от Render (который начинается с postgres://)
+        # SQLAlchemy 2.0+ требует postgresql:// вместо postgres://
+        db_url = DATABASE_URL
+        if db_url.startswith('postgres://'):
+            db_url = db_url.replace('postgres://', 'postgresql://', 1)
+            logger.info("URL базы данных преобразован из postgres:// в postgresql://")
+        
+        # Создание движка SQLAlchemy
+        engine = create_engine(db_url, echo=False)
+        
+        # Импортируем классы моделей
+        try:
+            from database import Base, User, Schedule
+            logger.info("Модели данных импортированы успешно")
+            
+            # Создаем таблицы
+            Base.metadata.create_all(engine)
+            logger.info("Таблицы созданы или уже существуют")
+            
+            # Проверяем, существуют ли таблицы
+            with engine.connect() as connection:
+                # Используем соответствующий запрос в зависимости от типа базы данных
+                if 'sqlite' in db_url:
+                    # SQLite
+                    result = connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+                else:
+                    # PostgreSQL
+                    result = connection.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))
+                
+                tables = [row[0] for row in result]
+                logger.info(f"Доступные таблицы: {tables}")
+                
+                if 'users' in tables and 'schedules' in tables:
+                    logger.info("✅ Необходимые таблицы существуют")
+                    return True
+                else:
+                    logger.warning("⚠️ Некоторые необходимые таблицы отсутствуют")
+                    return False
+                
+        except ImportError as e:
+            logger.error(f"❌ Ошибка при импорте моделей данных: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка при создании таблиц: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка при проверке и создании таблиц: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
+def test_webhook_with_message():
+    """Тестирует вебхук путем отправки тестового сообщения на Telegram API."""
+    if not WEBHOOK_URL:
+        logger.warning("⚠️ URL вебхука не задан, тестирование невозможно.")
+        return False
+    
+    logger.info(f"Тестирование вебхука на URL: {WEBHOOK_URL}")
+    
+    # Формируем тестовое сообщение (обновление), которое будет отправлено на вебхук
+    test_update = {
+        "update_id": int(time.time()),
+        "message": {
+            "message_id": int(time.time()) % 10000,
+            "from": {
+                "id": 12345,
+                "is_bot": False,
+                "first_name": "Тестовый",
+                "last_name": "Пользователь",
+                "username": "test_user"
+            },
+            "chat": {
+                "id": 12345,
+                "first_name": "Тестовый",
+                "last_name": "Пользователь",
+                "username": "test_user",
+                "type": "private"
+            },
+            "date": int(time.time()),
+            "text": "/ping",
+            "entities": [
+                {
+                    "offset": 0,
+                    "length": 5,
+                    "type": "bot_command"
+                }
+            ]
+        }
+    }
+    
+    try:
+        # Отправляем POST-запрос на вебхук
+        response = requests.post(WEBHOOK_URL, json=test_update, timeout=10)
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Вебхук успешно принял тестовое сообщение. Статус: {response.status_code}")
+            logger.info(f"Ответ: {response.text[:100]}...")
+            return True
+        else:
+            logger.error(f"❌ Вебхук вернул ошибку. Статус: {response.status_code}")
+            logger.error(f"Ответ: {response.text[:200]}...")
+            return False
+            
+    except requests.RequestException as e:
+        logger.error(f"❌ Ошибка при тестировании вебхука: {e}")
+        return False
+
 def run_setup():
     """Запускает полную настройку проекта на Render."""
     logger.info("=== ЗАПУСК НАСТРОЙКИ ПРОЕКТА НА RENDER ===")
@@ -205,15 +328,19 @@ def run_setup():
         logger.error("❌ Критическая ошибка: не удалось подключиться к базе данных. Остановка настройки.")
         return False
     
-    # 2. Проверяем доступность API Telegram
+    # 2. Создаем таблицы, если они не существуют
+    if not create_tables_if_not_exist():
+        logger.warning("⚠️ Не удалось создать все необходимые таблицы. Продолжаем настройку с ограниченной функциональностью.")
+    
+    # 3. Проверяем доступность API Telegram
     if not check_telegram_api():
         logger.error("❌ Критическая ошибка: не удалось подключиться к API Telegram. Остановка настройки.")
         return False
     
-    # 3. Проверяем текущий статус вебхука
+    # 4. Проверяем текущий статус вебхука
     webhook_info = check_webhook_status()
     
-    # 4. Устанавливаем или обновляем вебхук, если необходимо
+    # 5. Устанавливаем или обновляем вебхук, если необходимо
     if not webhook_info or not webhook_info.get('url') or (WEBHOOK_URL and webhook_info.get('url') != WEBHOOK_URL):
         logger.info("Требуется обновление вебхука.")
         if not set_webhook():
@@ -222,9 +349,13 @@ def run_setup():
     else:
         logger.info("✅ Вебхук уже настроен правильно.")
     
-    # 5. Проверяем вебхук после установки
+    # 6. Проверяем вебхук после установки
     time.sleep(2)  # Даем время на применение изменений
     check_webhook_status()
+    
+    # 7. Тестируем вебхук путем отправки тестового сообщения
+    if WEBHOOK_URL:
+        test_webhook_with_message()
     
     logger.info("=== НАСТРОЙКА ПРОЕКТА ЗАВЕРШЕНА ===")
     return True
