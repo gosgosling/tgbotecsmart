@@ -3,8 +3,10 @@ import logging
 from datetime import datetime, timedelta, time as dt_time
 import pytz
 import sys
-from flask import Flask, request, jsonify
 import threading
+import http.server
+import socketserver
+import json
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -50,6 +52,7 @@ scheduler = BackgroundScheduler(timezone=pytz.timezone('Europe/Moscow'))
 
 # Получаем переменные окружения для вебхука (для Render)
 PORT = int(os.environ.get('PORT', 10000))
+CHECK_SERVER_PORT = int(os.environ.get('CHECK_SERVER_PORT', 8080))
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
@@ -70,6 +73,42 @@ USE_WEBHOOK = bool(WEBHOOK_URL)
 logger.info(f"Режим вебхука: {'Включен' if USE_WEBHOOK else 'Отключен'}")
 if USE_WEBHOOK:
     logger.info(f"Используемый URL вебхука: {WEBHOOK_URL}")
+
+# Создаем HTTP-сервер для проверки доступности
+class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/ping':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            
+            status_info = {
+                'status': 'ok',
+                'message': 'Bot is running',
+                'time': datetime.now().isoformat(),
+                'webhook_enabled': USE_WEBHOOK,
+                'webhook_url': WEBHOOK_URL if USE_WEBHOOK else None
+            }
+            
+            self.wfile.write(json.dumps(status_info).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not Found')
+    
+    def log_message(self, format, *args):
+        # Переопределяем логирование, чтобы оно шло через наш логгер
+        logger.info(f"Health check: {self.address_string()} - {format % args}")
+
+# Функция для запуска HTTP-сервера
+def start_health_check_server():
+    try:
+        health_handler = HealthCheckHandler
+        health_check_server = socketserver.TCPServer(("0.0.0.0", CHECK_SERVER_PORT), health_handler)
+        logger.info(f"Запущен HTTP-сервер для проверки доступности на порту {CHECK_SERVER_PORT}")
+        health_check_server.serve_forever()
+    except Exception as e:
+        logger.error(f"Ошибка при запуске HTTP-сервера проверки доступности: {e}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -367,27 +406,9 @@ def main() -> None:
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, feedback_message))
         logger.info("Обработчики добавлены")
         
-        # Запускаем Flask-сервер для проверки доступности
+        # Запускаем HTTP-сервер для проверки доступности в отдельном потоке
         if USE_WEBHOOK:
-            # Создаем Flask-приложение для проверки работоспособности
-            app = Flask(__name__)
-            
-            @app.route('/ping', methods=['GET'])
-            def ping():
-                return jsonify({
-                    'status': 'ok',
-                    'message': 'Bot is running',
-                    'time': datetime.now().isoformat(),
-                    'webhook_enabled': USE_WEBHOOK,
-                    'webhook_url': WEBHOOK_URL
-                })
-            
-            # Запускаем Flask-сервер в отдельном потоке
-            def run_flask():
-                app.run(host='0.0.0.0', port=int(os.environ.get('FLASK_PORT', 8080)))
-                
-            threading.Thread(target=run_flask, daemon=True).start()
-            logger.info(f"Запущен HTTP-сервер на порту {os.environ.get('FLASK_PORT', 8080)} для проверки доступности")
+            threading.Thread(target=start_health_check_server, daemon=True).start()
         
         # Запускаем бота в зависимости от режима (вебхук или polling)
         if USE_WEBHOOK:

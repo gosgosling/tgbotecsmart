@@ -1,6 +1,7 @@
 import requests
 import sys
 import os
+import time
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
@@ -164,27 +165,100 @@ def check_render_service(url):
     """Проверка доступности сервиса на Render."""
     ping_url = f"{url.rstrip('/')}/ping"
     
+    print(f"\n=== Проверка доступности сервиса на {ping_url} ===")
+    print("Подождите, сервер на Render может требовать время для пробуждения...")
+    
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(f"Попытка {attempt}/{max_attempts}...")
+            response = requests.get(ping_url, timeout=30)  # Увеличенный таймаут
+            
+            print(f"Статус-код: {response.status_code}")
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    print(f"Статус: {data.get('status')}")
+                    print(f"Сообщение: {data.get('message')}")
+                    print(f"Время: {data.get('time')}")
+                    print(f"Вебхук включен: {data.get('webhook_enabled')}")
+                    print(f"URL вебхука: {data.get('webhook_url')}")
+                    return True
+                except:
+                    print("Ответ не является JSON")
+                    print(f"Содержимое: {response.text[:100]}")
+            else:
+                print(f"Неуспешный ответ: {response.text[:100]}")
+            
+            if attempt < max_attempts:
+                wait_time = 10  # секунд
+                print(f"Ожидание {wait_time} секунд перед следующей попыткой...")
+                time.sleep(wait_time)
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Ошибка при выполнении запроса: {e}")
+            
+            if attempt < max_attempts:
+                wait_time = 10  # секунд
+                print(f"Ожидание {wait_time} секунд перед следующей попыткой...")
+                time.sleep(wait_time)
+    
+    print("Все попытки исчерпаны. Сервис недоступен.")
+    return False
+
+def remove_webhook():
+    """Удаляет текущий вебхук."""
+    print("\n=== Удаление вебхука ===")
+    
+    confirm = input("Вы уверены, что хотите удалить текущий вебхук? (y/n): ")
+    if confirm.lower() != 'y':
+        print("Операция отменена.")
+        return False
+    
+    remove_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook"
+    
     try:
-        print(f"\n=== Проверка доступности сервиса на {ping_url} ===")
-        response = requests.get(ping_url, timeout=10)
+        response = requests.post(remove_url)
+        response.raise_for_status()
         
-        print(f"Статус-код: {response.status_code}")
-        
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                print(f"Статус: {data.get('status')}")
-                print(f"Сообщение: {data.get('message')}")
-                print(f"Время: {data.get('time')}")
-                print(f"Вебхук включен: {data.get('webhook_enabled')}")
-                print(f"URL вебхука: {data.get('webhook_url')}")
-                return True
-            except:
-                print("Ответ не является JSON")
-                print(f"Содержимое: {response.text[:100]}")
-                return False
+        data = response.json()
+        if data.get("ok"):
+            print("Вебхук успешно удален!")
+            return True
         else:
-            print(f"Неуспешный ответ: {response.text[:100]}")
+            print(f"Ошибка: {data.get('description', 'Неизвестная ошибка')}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при выполнении запроса: {e}")
+        return False
+
+def send_test_message():
+    """Отправляет тестовое сообщение в чат с ботом."""
+    print("\n=== Отправка тестового сообщения ===")
+    
+    chat_id = input("Введите ID вашего чата: ")
+    if not chat_id:
+        print("ID чата не может быть пустым. Операция отменена.")
+        return False
+    
+    send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    params = {
+        "chat_id": chat_id,
+        "text": "Это тестовое сообщение от скрипта проверки бота. Если вы видите это сообщение, значит бот работает правильно."
+    }
+    
+    try:
+        response = requests.post(send_url, json=params)
+        response.raise_for_status()
+        
+        data = response.json()
+        if data.get("ok"):
+            print("Тестовое сообщение успешно отправлено!")
+            return True
+        else:
+            print(f"Ошибка: {data.get('description', 'Неизвестная ошибка')}")
             return False
             
     except requests.exceptions.RequestException as e:
@@ -204,19 +278,35 @@ def main():
     # Проверка вебхука
     webhook_info = check_webhook()
     
-    # Проверка обновлений
-    updates = check_updates()
-    
-    # Проверка сервиса на Render
-    if webhook_info and webhook_info.get('url'):
-        webhook_base_url = webhook_info.get('url').split('/bot')[0]
-        check_render_service(webhook_base_url)
-    else:
-        url = input("\nВведите URL вашего сервиса для проверки (например, https://feedback-bot.onrender.com): ")
-        if url:
-            check_render_service(url)
-    
-    print("\n==== Диагностика завершена ====")
+    # Меню действий
+    while True:
+        print("\n=== Меню действий ===")
+        print("1. Проверить статус вебхука")
+        print("2. Проверить последние обновления")
+        print("3. Проверить доступность сервиса на Render")
+        print("4. Удалить вебхук")
+        print("5. Отправить тестовое сообщение")
+        print("6. Выйти")
+        
+        choice = input("\nВыберите действие (1-6): ")
+        
+        if choice == '1':
+            check_webhook()
+        elif choice == '2':
+            check_updates()
+        elif choice == '3':
+            url = input("\nВведите URL вашего сервиса для проверки (например, https://feedback-bot.onrender.com): ")
+            if url:
+                check_render_service(url)
+        elif choice == '4':
+            remove_webhook()
+        elif choice == '5':
+            send_test_message()
+        elif choice == '6':
+            print("\n==== Диагностика завершена ====")
+            break
+        else:
+            print("Неверный выбор. Пожалуйста, выберите число от 1 до 6.")
 
 if __name__ == "__main__":
     main() 
