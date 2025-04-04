@@ -4,10 +4,26 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    plan: free  # Free tier
+    # Лучше указать больше ресурсов, если доступно:
+    # plan: standard
+    # scaling:
+    #   minInstances: 1
+    #   maxInstances: 1
+
     envVars:
       - key: TELEGRAM_TOKEN
         sync: false
       - key: MANAGER_CHAT_ID
         sync: false
       - key: DATABASE_URL
-        sync: false 
+        # Используем PostgreSQL базу данных
+        fromDatabase:
+          name: bot-db
+          property: connectionString
+
+databases:
+  - name: bot-db
+    plan: free  # Free tier PostgreSQL
+    # Можно использовать платный план для большей надежности:
+    # plan: standard 

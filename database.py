@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, time
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Time
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Time, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
@@ -97,7 +97,15 @@ def init_schedule():
     
     try:
         # Проверяем, есть ли уже расписание
-        schedule_count = session.query(Schedule).count()
+        def count_schedules(s):
+            return s.query(Schedule).count()
+        
+        schedule_count = safe_execute_query(session, count_schedules)
+        if schedule_count is None:  # Ошибка при выполнении запроса
+            logger.error("Ошибка при подсчете записей в расписании")
+            session.close()
+            return False
+            
         logger.info(f"Найдено записей в расписании: {schedule_count}")
         
         if schedule_count == 0:
@@ -108,8 +116,13 @@ def init_schedule():
             # Расписание для выходных (Сб, 14:00)
             session.add(Schedule(group_type='weekend', day_of_week=5, end_time=time(14, 0)))  # 5 - Суббота
             
-            session.commit()
-            logger.info("Расписание успешно инициализировано")
+            try:
+                session.commit()
+                logger.info("Расписание успешно инициализировано")
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении расписания: {e}")
+                session.rollback()
+                return False
         else:
             logger.info("Расписание уже существует, инициализация не требуется")
         
@@ -131,8 +144,10 @@ def check_database_connection():
     try:
         # Простой запрос для проверки соединения
         connection = engine.connect()
+        # В SQLAlchemy 2.0 рекомендуется явно закрывать соединения
+        result = connection.execute(text("SELECT 1")).fetchone()
         connection.close()
-        logger.info("Соединение с базой данных успешно установлено")
+        logger.info(f"Соединение с базой данных успешно установлено: {result}")
         return True
     except Exception as e:
         logger.error(f"Ошибка при подключении к базе данных: {e}")
@@ -145,8 +160,8 @@ def get_session():
     """Получить сессию базы данных."""
     try:
         session = Session()
-        # Проверяем работоспособность сессии
-        session.execute("SELECT 1")
+        # Проверяем работоспособность сессии с правильным синтаксисом для SQLAlchemy 2.0
+        session.execute(text("SELECT 1"))
         return session
     except Exception as e:
         logger.error(f"Ошибка при создании сессии: {e}")
@@ -154,6 +169,19 @@ def get_session():
         logger.error(traceback.format_exc())
         # Если ошибка связана с базой данных, вернем None, иначе пробросим исключение
         raise
+
+
+# Добавим функцию для безопасного выполнения запросов
+def safe_execute_query(session, query_func):
+    """Безопасно выполняет запрос к базе данных с обработкой ошибок."""
+    try:
+        return query_func(session)
+    except Exception as e:
+        logger.error(f"Ошибка при выполнении запроса: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        session.rollback()
+        return None
 
 
 # При импорте модуля, проверяем подключение к БД и создаем таблицы
