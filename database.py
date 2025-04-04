@@ -1,5 +1,6 @@
 import os
 import logging
+import sys
 from datetime import datetime, time
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Time, text
 from sqlalchemy.ext.declarative import declarative_base
@@ -7,6 +8,11 @@ from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
 # Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
 # Загрузка переменных окружения
@@ -23,17 +29,19 @@ if DATABASE_URL.startswith('postgres://'):
 
 logger.info(f"Используется база данных: {DATABASE_URL.split('://')[0]}")
 
+# Создание базовых объектов SQLAlchemy
+Base = declarative_base()
+
 # Создание движка SQLAlchemy
 try:
     logger.info(f"Создание движка SQLAlchemy для подключения к БД: {DATABASE_URL.split('://')[0]}")
     engine = create_engine(DATABASE_URL, echo=False)
-    Base = declarative_base()
     Session = sessionmaker(bind=engine)
     logger.info("Движок SQLAlchemy создан успешно")
 except Exception as e:
     logger.error(f"Критическая ошибка при создании движка SQLAlchemy: {e}")
-    # Не будем здесь применять sys.exit, т.к. это приведет к падению всего приложения
-    # Вместо этого обработаем ошибки в функциях ниже
+    # Даже если произошла ошибка, мы определим Session, чтобы избежать ошибок импорта
+    Session = sessionmaker()
 
 # Определяем глобальную переменную для отслеживания статуса базы данных
 DB_READY = False

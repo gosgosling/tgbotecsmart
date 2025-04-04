@@ -12,7 +12,7 @@ import traceback
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, 
+    Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, 
     MessageHandler, ContextTypes, ConversationHandler, filters
 )
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -821,13 +821,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.error(f"Не удалось отправить сообщение об ошибке менеджеру: {e}")
 
 
-def setup_application():
+def setup_application(application):
     """Подготавливает приложение бота с обработкой ошибок."""
     try:
-        # Создаем и настраиваем экземпляр приложения
-        application = Application.builder().token(TELEGRAM_TOKEN).build()
-        logger.info("Приложение создано")
-        
         # Добавляем обработчик для логирования всех обновлений
         application.add_handler(MessageHandler(filters.ALL, log_all_updates), group=-1)
         logger.info("Добавлен обработчик для логирования всех обновлений")
@@ -1146,7 +1142,7 @@ def setup_logging():
 def main() -> None:
     """Запуск бота."""
     # Получение глобальных переменных
-    global DB_READY
+    global DB_READY, DATABASE_URL
 
     # Загрузка переменных окружения и настройка логгирования
     load_dotenv()  # Читаем .env файл
@@ -1156,7 +1152,6 @@ def main() -> None:
     logging.info("Проверка соединения с базой данных...")
     if DATABASE_URL.startswith('postgres://'):
         # Исправляем URL для совместимости с SQLAlchemy 2.0+
-        global DATABASE_URL
         DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
         logging.info("URL базы данных преобразован из postgres:// в postgresql://")
     
