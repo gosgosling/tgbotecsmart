@@ -1,11 +1,16 @@
+"""
+Модуль для работы с базой данных.
+Определяет модели данных и функции для инициализации базы.
+"""
 import os
 import logging
 import sys
-from datetime import datetime, time
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Time, text
+from datetime import datetime
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, text, inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
+import traceback
 
 # Настройка логирования
 logging.basicConfig(
@@ -21,32 +26,25 @@ load_dotenv()
 # Получение URL базы данных
 DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///feedback_bot.db')
 
-# Проверка на PostgreSQL URL от Render (который начинается с postgres://)
-# SQLAlchemy 2.0+ требует postgresql:// вместо postgres://
-if DATABASE_URL.startswith('postgres://'):
-    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
-    logger.info("URL базы данных преобразован из postgres:// в postgresql://")
-
 logger.info(f"Используется база данных: {DATABASE_URL.split('://')[0]}")
 
-# Создание базовых объектов SQLAlchemy
+# Создаем базовый класс для моделей
 Base = declarative_base()
 
-# Создание движка SQLAlchemy
+# Создаем движок SQLAlchemy
 try:
     logger.info(f"Создание движка SQLAlchemy для подключения к БД: {DATABASE_URL.split('://')[0]}")
     engine = create_engine(DATABASE_URL, echo=False)
-    Session = sessionmaker(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     logger.info("Движок SQLAlchemy создан успешно")
 except Exception as e:
     logger.error(f"Критическая ошибка при создании движка SQLAlchemy: {e}")
     # Даже если произошла ошибка, мы определим Session, чтобы избежать ошибок импорта
-    Session = sessionmaker()
+    SessionLocal = sessionmaker()
 
-# Определяем глобальную переменную для отслеживания статуса базы данных
-DB_READY = False
-
+# Определение таблиц
 class User(Base):
+    """Пользователь бота."""
     __tablename__ = 'users'
     
     id = Column(Integer, primary_key=True)
@@ -54,372 +52,305 @@ class User(Base):
     username = Column(String, nullable=True)
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
-    group_type = Column(String, nullable=True)  # 'weekday' или 'weekend'
-    start_date = Column(DateTime, nullable=True)
+    group_type = Column(String, nullable=False)
+    start_date = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=datetime.now)
     is_active = Column(Boolean, default=True)
     
     def __repr__(self):
-        return f"User(id={self.id}, chat_id={self.chat_id}, username={self.username})"
+        return f"<User(id={self.id}, chat_id={self.chat_id}, username={self.username})>"
 
 
-class Schedule(Base):
-    __tablename__ = 'schedules'
+class Feedback(Base):
+    """
+    Модель для хранения обратной связи от пользователей.
+    """
+    __tablename__ = 'feedback'
     
     id = Column(Integer, primary_key=True)
-    group_type = Column(String, nullable=False)  # 'weekday' или 'weekend'
-    day_of_week = Column(Integer, nullable=False)  # 0-6 (понедельник-воскресенье)
-    end_time = Column(Time, nullable=False)
+    user_id = Column(Integer, nullable=False)
+    message = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
     
     def __repr__(self):
-        return f"Schedule(id={self.id}, group_type={self.group_type}, day={self.day_of_week}, end_time={self.end_time})"
+        return f"<Feedback(id={self.id}, user_id={self.user_id}, created_at={self.created_at})>"
 
 
-# Создание таблиц в базе данных
-def create_tables():
-    logger.info("Создание таблиц в базе данных...")
+def get_engine():
+    """
+    Создает и возвращает объект SQLAlchemy Engine.
+    """
+    logger.info(f"Подключение к базе данных: {DATABASE_URL.split('://')[0]}")
+    return create_engine(DATABASE_URL)
+
+
+def init_db():
+    """
+    Инициализирует базу данных: создает таблицы и настраивает сессию.
+    """
     try:
+        # Создаем движок базы данных
+        engine = get_engine()
+        
+        # Создаем таблицы, если они не существуют
         Base.metadata.create_all(engine)
-        logger.info("Таблицы успешно созданы")
+        
+        # Настраиваем фабрику сессий
+        SessionLocal.configure(bind=engine)
+        
+        logger.info("База данных инициализирована успешно")
         return True
+    
     except Exception as e:
-        logger.error(f"Ошибка при создании таблиц: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"Ошибка при инициализации базы данных: {e}")
         return False
 
 
-# Инициализация расписания по умолчанию
-def init_schedule():
-    """Инициализирует расписание по умолчанию и возвращает True в случае успеха."""
-    logger.info("Инициализация расписания...")
+def check_user_exists(user_id: int) -> bool:
+    """
+    Проверяет, существует ли пользователь с указанным ID в базе данных.
     
-    # Проверяем соединение с базой данных
-    if not check_database_connection():
-        logger.error("Не удалось инициализировать расписание: база данных недоступна")
-        return False
-    
+    Args:
+        user_id: ID пользователя в Telegram
+        
+    Returns:
+        bool: True, если пользователь существует, иначе False
+    """
     try:
-        session = Session()
+        session = SessionLocal()
+        
+        # Проверяем наличие пользователя
+        result = session.execute(
+            text("SELECT 1 FROM users WHERE chat_id = :user_id"),
+            {"user_id": user_id}
+        ).scalar() is not None
+
+        logger.debug(f"Проверка существования пользователя {user_id}: {result}")
+        
+        return result
+    
     except Exception as e:
-        logger.error(f"Не удалось создать сессию для инициализации расписания: {e}")
+        logger.error(f"Ошибка при проверке существования пользователя {user_id}: {e}")
         return False
     
-    try:
-        # Проверяем, есть ли уже расписание
-        def count_schedules(s):
-            return s.query(Schedule).count()
-        
-        schedule_count = safe_execute_query(session, count_schedules)
-        if schedule_count is None:  # Ошибка при выполнении запроса
-            logger.error("Ошибка при подсчете записей в расписании")
-            session.close()
-            return False
-            
-        logger.info(f"Найдено записей в расписании: {schedule_count}")
-        
-        if schedule_count == 0:
-            # Расписание для будних дней (Пн-Пт, 18:00)
-            for day in range(0, 5):  # 0-4 (Пн-Пт)
-                session.add(Schedule(group_type='weekday', day_of_week=day, end_time=time(18, 0)))
-            
-            # Расписание для выходных (Сб, 14:00)
-            session.add(Schedule(group_type='weekend', day_of_week=5, end_time=time(14, 0)))  # 5 - Суббота
-            
-            try:
-                session.commit()
-                logger.info("Расписание успешно инициализировано")
-            except Exception as e:
-                logger.error(f"Ошибка при сохранении расписания: {e}")
-                session.rollback()
-                return False
-        else:
-            logger.info("Расписание уже существует, инициализация не требуется")
-        
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при инициализации расписания: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        session.rollback()
-        return False
     finally:
         session.close()
 
 
-def check_database_connection():
-    """Проверяет соединение с базой данных и логирует его статус."""
-    logger.info("Проверка соединения с базой данных...")
-    try:
-        # Получаем сессию через прямое создание, чтобы избежать рекурсии
-        session = Session()
-        
-        # Пробуем выполнить простой запрос
-        result = session.execute(text("SELECT 1")).scalar()
-        
-        # Обязательно закрываем сессию после использования
-        session.close()
-        
-        if result == 1:
-            logger.info("✅ Соединение с базой данных успешно установлено!")
-            # Используем глобальную переменную без объявления global внутри функции
-            DB_READY = True
-            return True
-        else:
-            logger.error("❌ Соединение с базой данных установлено, но проверочный запрос вернул неправильный результат.")
-            DB_READY = False
-            return False
+def create_new_user(user_id: int, username: str, first_name: str, last_name: str, 
+                    group: str, group_day: int, start_date: datetime) -> bool:
+    """
+    Создает нового пользователя в базе данных.
     
-    except Exception as e:
-        logger.error(f"❌ Ошибка при проверке соединения с базой данных: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        DB_READY = False
-        return False
-
-
-def get_session():
-    """Получить сессию базы данных."""
-    try:
-        session = Session()
-        # Проверяем работоспособность сессии с правильным синтаксисом для SQLAlchemy 2.0
-        session.execute(text("SELECT 1"))
-        return session
-    except Exception as e:
-        logger.error(f"Ошибка при создании сессии: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        # Если ошибка связана с базой данных, вернем None, иначе пробросим исключение
-        raise
-
-
-# Добавим функцию для безопасного выполнения запросов
-def safe_execute_query(session, query_func):
-    """Безопасно выполняет запрос к базе данных с обработкой ошибок."""
-    try:
-        return query_func(session)
-    except Exception as e:
-        logger.error(f"Ошибка при выполнении запроса: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        session.rollback()
-        return None
-
-
-# При импорте модуля, проверяем подключение к БД и создаем таблицы
-# Инициализируем DB_READY, не используя функцию, которая пытается его изменить
-try:
-    # Проверка соединения с базой данных
-    session = Session()
-    result = session.execute(text("SELECT 1")).scalar()
-    session.close()
-    
-    # Создание таблиц
-    DB_READY = create_tables()
-    
-    logger.info(f"Статус готовности базы данных: {'готова' if DB_READY else 'не готова'}")
-except Exception as e:
-    logger.error(f"Ошибка при инициализации базы данных: {e}")
-    DB_READY = False
-
-
-def add_manager(chat_id, username=None, first_name=None, last_name=None):
-    """Добавляет нового менеджера в базу данных."""
-    try:
-        session = get_session()
+    Args:
+        user_id: ID пользователя в Telegram
+        username: Имя пользователя в Telegram
+        first_name: Имя пользователя
+        last_name: Фамилия пользователя
+        group: Группа пользователя
+        group_day: День недели занятий (0-6)
+        start_date: Дата начала занятий
         
-        # Проверяем, существует ли уже менеджер с таким chat_id
-        existing_manager = session.query(User).filter(User.chat_id == chat_id).first()
+    Returns:
+        bool: True, если пользователь успешно создан, иначе False
+    """
+    try:
+        session = SessionLocal()
         
-        if existing_manager:
-            # Если менеджер уже существует, обновляем его данные
-            existing_manager.username = username
-            existing_manager.first_name = first_name
-            existing_manager.last_name = last_name
-            existing_manager.is_active = True
-            session.commit()
-            logger.info(f"Обновлены данные менеджера с chat_id={chat_id}")
-            session.close()
-            return True
+        # Обработка параметров для избежания ошибок
+        if isinstance(start_date, str):
+            # Если дата пришла в виде строки, преобразуем её в объект datetime
+            try:
+                if "." in start_date:  # Формат ДД.ММ.ГГГГ
+                    start_date = datetime.strptime(start_date, '%d.%m.%Y')
+                else:  # Другие возможные форматы
+                    start_date = datetime.strptime(start_date.split('.')[0], '%Y-%m-%d %H:%M:%S')
+            except (ValueError, IndexError):
+                # Если не удалось, используем текущую дату
+                logger.warning(f"Невозможно преобразовать строку даты '{start_date}' в формат datetime. Используется текущая дата.")
+                start_date = datetime.now()
+                
+        # Проверка на None значения и установка дефолтных значений
+        if username is None:
+            username = ""
+        if first_name is None:
+            first_name = "Пользователь"
+        if last_name is None:
+            last_name = ""
+            
+        # Детальное логирование параметров
+        logger.info(f"Создание пользователя с параметрами: user_id={user_id}, username={username}, "
+                    f"first_name={first_name}, last_name={last_name}, group={group}, "
+                    f"start_date={start_date}")
         
-        # Создаем нового менеджера
-        new_manager = User(
-            chat_id=chat_id,
+        # Создаем нового пользователя
+        new_user = User(
+            chat_id=user_id,
             username=username,
             first_name=first_name,
             last_name=last_name,
-            is_active=True
+            group_type=group,
+            start_date=start_date
         )
         
-        session.add(new_manager)
+        session.add(new_user)
         session.commit()
-        logger.info(f"Добавлен новый менеджер с chat_id={chat_id}")
-        session.close()
-        return True
         
-    except Exception as e:
-        logger.error(f"Ошибка при добавлении менеджера: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        try:
-            session.rollback()
-            session.close()
-        except:
-            pass
-        return False
-
-
-def get_manager_by_telegram_id(chat_id):
-    """Получает менеджера по telegram ID (chat_id)."""
-    try:
-        session = get_session()
-        manager = session.query(User).filter(User.chat_id == chat_id).first()
-        session.close()
-        return manager
-    except Exception as e:
-        logger.error(f"Ошибка при получении менеджера по chat_id={chat_id}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        try:
-            session.close()
-        except:
-            pass
-        return None
-
-
-def get_all_managers():
-    """Получает список всех активных менеджеров."""
-    try:
-        session = get_session()
-        managers = session.query(User).filter(User.is_active == True).all()
-        session.close()
-        return managers
-    except Exception as e:
-        logger.error(f"Ошибка при получении списка менеджеров: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        try:
-            session.close()
-        except:
-            pass
-        return []
-
-
-def add_feedback_request(chat_id, message):
-    """Сохраняет запрос на обратную связь в базе данных.
+        logger.info(f"Создан новый пользователь: {user_id}, группа: {group}")
+        return True
     
-    В текущей реализации просто возвращает True, поскольку нет таблицы для хранения запросов.
-    Можно расширить в будущем, добавив соответствующую таблицу.
+    except Exception as e:
+        logger.error(f"Ошибка при создании пользователя {user_id}: {e}")
+        session.rollback()
+        return False
+    
+    finally:
+        session.close()
+
+
+def update_user_status(user_id: int, is_active: bool) -> bool:
+    """
+    Обновляет статус активности пользователя.
+    
+    Args:
+        user_id: ID пользователя в Telegram
+        is_active: Новый статус активности
+        
+    Returns:
+        bool: True, если статус успешно обновлен, иначе False
     """
     try:
-        # Проверяем, существует ли пользователь
-        session = get_session()
-        user = session.query(User).filter(User.chat_id == chat_id).first()
+        session = SessionLocal()
         
-        if not user:
-            logger.warning(f"Попытка добавить запрос на обратную связь для несуществующего пользователя: {chat_id}")
-            session.close()
+        # Обновляем статус активности
+        result = session.execute(
+            text("UPDATE users SET is_active = :is_active WHERE chat_id = :user_id"),
+            {"is_active": is_active, "user_id": user_id}
+        )
+        
+        session.commit()
+        
+        if result.rowcount > 0:
+            logger.info(f"Статус пользователя {user_id} обновлен на: {is_active}")
+            return True
+        else:
+            logger.warning(f"Пользователь {user_id} не найден при обновлении статуса")
             return False
-        
-        # Здесь можно было бы сохранить запрос в отдельной таблице
-        # В текущей реализации просто логируем событие
-        logger.info(f"Получен запрос на обратную связь от пользователя {chat_id}: {message[:50]}...")
-        
-        session.close()
-        return True
-        
-    except Exception as e:
-        logger.error(f"Ошибка при добавлении запроса на обратную связь: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        try:
-            session.close()
-        except:
-            pass
-        return False
-
-
-def check_and_schedule_feedback_requests():
-    """Проверяет расписание и назначает отправку запросов на обратную связь.
     
-    Эта функция вызывается планировщиком каждые 10 минут.
-    Она проверяет, есть ли группы, для которых нужно отправить запрос на обратную связь.
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении статуса пользователя {user_id}: {e}")
+        session.rollback()
+        return False
+    
+    finally:
+        session.close()
+
+
+def save_feedback(user_id: int, message: str) -> bool:
+    """
+    Сохраняет обратную связь от пользователя в базе данных.
+    
+    Args:
+        user_id: ID пользователя в Telegram
+        message: Текст обратной связи
+        
+    Returns:
+        bool: True, если обратная связь успешно сохранена, иначе False
     """
     try:
-        logger.info("Выполняется проверка расписания для отправки запросов на обратную связь")
+        session = SessionLocal()
         
-        # Получаем текущее время в Москве
-        from utils import get_current_moscow_time, get_weekday
-        now = get_current_moscow_time()
-        current_day = get_weekday()  # 0-6 (Пн-Вс)
-        current_time = now.time()
+        # Создаем новую запись обратной связи
+        new_feedback = Feedback(
+            user_id=user_id,
+            message=message
+        )
         
-        logger.info(f"Текущее время (Москва): {now}, день недели: {current_day}, время: {current_time}")
+        session.add(new_feedback)
+        session.commit()
         
-        # Получаем расписание для текущего дня
-        session = get_session()
-        
-        def get_schedules_for_today(s):
-            return s.query(Schedule).filter(Schedule.day_of_week == current_day).all()
-        
-        schedules = safe_execute_query(session, get_schedules_for_today)
-        
-        if not schedules:
-            logger.info(f"Нет расписаний для дня недели {current_day}")
-            session.close()
-            return True  # Успешное выполнение, просто нет расписаний
-        
-        logger.info(f"Найдено {len(schedules)} расписаний для дня недели {current_day}")
-        
-        # Список пользователей, которым нужно отправить запросы
-        users_to_notify = []
-        
-        # Проверяем расписания
-        for schedule in schedules:
-            end_time = schedule.end_time
-            group_type = schedule.group_type
-            
-            # Если текущее время близко к времени окончания занятия (в пределах 10 минут после)
-            time_diff = (datetime.combine(now.date(), current_time) - 
-                        datetime.combine(now.date(), end_time)).total_seconds() / 60
-            
-            if 0 <= time_diff <= 10:
-                logger.info(f"Время для отправки запросов на обратную связь группе {group_type}")
-                
-                # Получаем пользователей этой группы
-                def get_users_in_group(s):
-                    return s.query(User).filter(
-                        User.group_type == group_type,
-                        User.is_active == True
-                    ).all()
-                
-                users = safe_execute_query(session, get_users_in_group)
-                
-                if not users:
-                    logger.info(f"Нет активных пользователей в группе {group_type}")
-                    continue
-                
-                logger.info(f"Найдено {len(users)} пользователей в группе {group_type}")
-                
-                # Добавляем в список пользователей для уведомления
-                for user in users:
-                    users_to_notify.append(user.chat_id)
-                    logger.info(f"Запланирована отправка запроса на обратную связь пользователю {user.chat_id}")
-        
-        session.close()
-        logger.info(f"Проверка расписания завершена. Найдено {len(users_to_notify)} пользователей для уведомления.")
-        
-        # Возвращаем список пользователей, которым нужно отправить запросы
+        logger.info(f"Сохранена обратная связь от пользователя {user_id}")
         return True
-        
+    
     except Exception as e:
-        logger.error(f"Ошибка при проверке расписания: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        try:
-            session.close()
-        except:
-            pass
+        logger.error(f"Ошибка при сохранении обратной связи от пользователя {user_id}: {e}")
+        session.rollback()
+        return False
+    
+    finally:
+        session.close()
+
+
+def get_active_users_by_day(day: int) -> list:
+    """
+    Возвращает список активных пользователей для указанного дня недели.
+    
+    Args:
+        day: День недели (0-6)
         
-        # Возвращаем информацию о том, что произошла ошибка
-        return False 
+    Returns:
+        list: Список пользователей
+    """
+    try:
+        session = SessionLocal()
+        
+        # Получаем пользователей для указанного дня недели
+        users = session.query(User).filter(
+            User.is_active == True,
+            User.group_day == day
+        ).all()
+        
+        return users
+    
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка пользователей для дня {day}: {e}")
+        return []
+    
+    finally:
+        session.close()
+
+
+def check_database_connection() -> bool:
+    """
+    Проверяет соединение с базой данных.
+    
+    Returns:
+        bool: True, если соединение установлено успешно, иначе False
+    """
+    try:
+        session = SessionLocal()
+        # Пытаемся выполнить простой запрос
+        result = session.execute(text("SELECT 1")).scalar()
+        logger.info("✅ Соединение с базой данных установлено успешно")
+        return True
+    
+    except Exception as e:
+        logger.error(f"❌ Ошибка при проверке соединения с базой данных: {e}")
+        logger.error(f"Traceback (most recent call last):\n{traceback.format_exc()}")
+        return False
+    
+    finally:
+        session.close()
+
+# Если модуль запущен напрямую, инициализируем базу данных
+if __name__ == "__main__":
+    logger.info("Запуск инициализации базы данных")
+    if init_db():
+        logger.info("База данных успешно инициализирована")
+        
+        # Проверка наличия таблиц
+        try:
+            # Создаем инспектор для проверки схемы базы данных
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            logger.info(f"Созданные таблицы: {', '.join(tables)}")
+            
+            # Проверяем структуру таблиц
+            for table in tables:
+                columns = inspector.get_columns(table)
+                column_names = [column['name'] for column in columns]
+                logger.info(f"Структура таблицы '{table}': {', '.join(column_names)}")
+        except Exception as e:
+            logger.error(f"Ошибка при проверке структуры базы данных: {e}")
+            
+        logger.info("Проверка базы данных завершена. Бот готов к запуску.") 
